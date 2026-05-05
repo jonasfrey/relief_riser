@@ -10,6 +10,7 @@ import {
   cropCanvas
 } from './imageProcessor.js';
 import { loadSTLFromFile } from './stlReader.js';
+import { loadGLBFromFile } from './glbReader.js';
 import { projectSTLToCanvas } from './stlProjector.js';
 import {
   buildReliefGeometry,
@@ -37,6 +38,8 @@ const els = {
   processedCanvas: $('processedCanvas'),
   stlControls: $('stlControls'),
   stlSide: $('stlSide'),
+  stlRenderSize: $('stlRenderSize'),
+  stlRenderSizeNum: $('stlRenderSizeNum'),
 
   brightness: $('brightness'),       brightnessNum: $('brightnessNum'),
   contrast: $('contrast'),           contrastNum: $('contrastNum'),
@@ -64,6 +67,8 @@ const els = {
   sidesControl: $('sidesControl'),
   closedBottom: $('closedBottom'),
   closedBottomControl: $('closedBottomControl'),
+  chamferTop: $('chamferTop'),       chamferTopNum: $('chamferTopNum'),
+  chamferTopControl: $('chamferTopControl'),
   plateW: $('plateW'),               plateWNum: $('plateWNum'),
   plateWLabel: $('plateWLabel'),
   plateH: $('plateH'),               plateHNum: $('plateHNum'),
@@ -102,6 +107,8 @@ const sliderPairs = [
   ['tileY', 'tileYNum'],
   ['marginX', 'marginXNum'],
   ['marginY', 'marginYNum'],
+  ['chamferTop', 'chamferTopNum'],
+  ['stlRenderSize', 'stlRenderSizeNum'],
   ['plateW', 'plateWNum'],
   ['plateH', 'plateHNum'],
   ['baseThickness', 'baseThicknessNum']
@@ -195,6 +202,7 @@ const state = {
   inputType: 'image',     // 'image' or 'stl'
   stlData: null,          // { positions, triCount } when inputType === 'stl'
   stlSide: 'front',
+  lastStlRenderSize: 0,   // tracks the size we last projected at
   processed: null,        // { displayImageData, levelMap, width, height, colorCount }
   heightmapMm: null,      // Float32Array of mm above the base
   geometry: null,
@@ -308,15 +316,18 @@ function updateThresholdVisibility() {
 
 function updateShapeLabels() {
   const isPoly = state.shape === 'polygon';
-  if (state.shape === 'cylindrical') {
-    els.plateWLabel.textContent = 'Diameter D';
+  const isCyl  = state.shape === 'cylindrical';
+  if (isCyl) {
+    els.plateWLabel.textContent = 'Image tile width (mm)';
   } else if (isPoly) {
     els.plateWLabel.textContent = 'Side width W';
   } else {
     els.plateWLabel.textContent = 'Width W';
   }
   els.sidesControl.classList.toggle('hidden', !isPoly);
-  els.closedBottomControl.classList.toggle('hidden', !isPoly);
+  // Closed bottom is available for both cylinder and polygon prism modes.
+  els.closedBottomControl.classList.toggle('hidden', !(isPoly || isCyl));
+  els.chamferTopControl.classList.toggle('hidden', !isPoly);
 }
 
 function updateResolutionVisibility() {
@@ -345,9 +356,13 @@ function applyAutoCrop() {
   paintToCanvas(canvasToImageData(state.sourceCanvas), els.originalCanvas);
 }
 
-// Set plate H from W (or πD for a cylinder) so the plate aspect matches the
-// (cropped) image aspect. Clamped + snapped to the H slider's step. Called on
-// image load and after the auto-crop toggle changes.
+// Set plate H so one image tile preserves its native aspect ratio on the
+// shape: H = (per-tile width on the surface) × (imgH / imgW). For
+// rectangular plates and polygon prisms the per-tile width is W. For
+// cylinders W is now the image tile width (the diameter is derived from
+// W × tileX / π), so the per-tile width is also just W. Clamped + snapped
+// to the H slider's step. Called on image load and after the auto-crop
+// toggle changes.
 function autoFitHeightToImage() {
   if (!state.sourceCanvas) return;
   const imgW = state.sourceCanvas.width;
@@ -355,8 +370,7 @@ function autoFitHeightToImage() {
   if (imgW <= 0 || imgH <= 0) return;
 
   const plateW = parseFloat(els.plateW.value);
-  const baseW = state.shape === 'cylindrical' ? Math.PI * plateW : plateW;
-  let h = baseW * (imgH / imgW);
+  let h = plateW * (imgH / imgW);
 
   const min = parseFloat(els.plateH.min);
   const max = parseFloat(els.plateH.max);
@@ -396,8 +410,10 @@ function readParamsFromUI() {
     shape: state.shape,
     sides: parseInt(els.sides.value, 10) || 4,
     closedBottom: els.closedBottom.checked,
+    chamferTop: parseFloat(els.chamferTop.value) || 0,
     autoCrop: state.autoCrop,
     stlSide: state.stlSide,
+    stlRenderSize: parseInt(els.stlRenderSize.value, 10) || STL_RENDER_MAX_DIM_DEFAULT,
     display: { ...state.display },
 
     asciiSTL: els.asciiSTL.checked
@@ -418,6 +434,8 @@ function writeParamsToUI(p) {
   setNum('maxDim', 'maxDimNum', p.maxDim);
   setNum('density', 'densityNum', p.density);
   setNum('sides', 'sidesNum', p.sides);
+  setNum('chamferTop', 'chamferTopNum', p.chamferTop);
+  setNum('stlRenderSize', 'stlRenderSizeNum', p.stlRenderSize);
   setNum('tileX', 'tileXNum', p.tileX);
   setNum('tileY', 'tileYNum', p.tileY);
   setNum('marginX', 'marginXNum', p.marginX);
@@ -508,8 +526,8 @@ els.dropZone.addEventListener('drop', (e) => {
   const file = e.dataTransfer.files && e.dataTransfer.files[0];
   if (!file) return;
   const isImg = /^image\//.test(file.type);
-  const isStl = /\.stl$/i.test(file.name);
-  if (isImg || isStl) handleFile(file);
+  const isMesh = /\.(stl|glb)$/i.test(file.name);
+  if (isImg || isMesh) handleFile(file);
 });
 
 els.stlSide.addEventListener('change', () => {
@@ -518,20 +536,30 @@ els.stlSide.addEventListener('change', () => {
   persist();
 });
 
-const STL_RENDER_MAX_DIM = 600;
+const STL_RENDER_MAX_DIM_DEFAULT = 600;
+
+function currentStlRenderSize() {
+  const v = parseInt(els.stlRenderSize.value, 10);
+  return Number.isFinite(v) && v >= 8 ? v : STL_RENDER_MAX_DIM_DEFAULT;
+}
 
 async function handleFile(file) {
   try {
-    const isStl = /\.stl$/i.test(file.name);
-    if (isStl) {
-      const stl = await loadSTLFromFile(file);
-      state.stlData = stl;
-      state.inputType = 'stl';
-      state.rawSourceCanvas = projectSTLToCanvas(stl, state.stlSide || 'front', STL_RENDER_MAX_DIM);
+    const lower = file.name.toLowerCase();
+    const isStl = lower.endsWith('.stl');
+    const isGlb = lower.endsWith('.glb');
+    if (isStl || isGlb) {
+      const mesh = isStl ? await loadSTLFromFile(file) : await loadGLBFromFile(file);
+      state.stlData = mesh;
+      state.inputType = 'stl';   // kept for backward-compat — same code path
+      const size = currentStlRenderSize();
+      state.rawSourceCanvas = projectSTLToCanvas(mesh, state.stlSide || 'front', size);
+      state.lastStlRenderSize = size;
     } else {
       state.stlData = null;
       state.inputType = 'image';
       state.rawSourceCanvas = await loadImageFromFile(file);
+      state.lastStlRenderSize = 0;
     }
     state.sourceFilename = file.name.replace(/\.[^.]+$/, '') || 'input';
     updateStlControlsVisibility();
@@ -547,12 +575,33 @@ async function handleFile(file) {
 function rerenderStlDepth() {
   if (state.inputType !== 'stl' || !state.stlData) return;
   try {
-    state.rawSourceCanvas = projectSTLToCanvas(state.stlData, state.stlSide, STL_RENDER_MAX_DIM);
+    const size = currentStlRenderSize();
+    state.rawSourceCanvas = projectSTLToCanvas(state.stlData, state.stlSide, size);
+    state.lastStlRenderSize = size;
     applyAutoCrop();
     autoFitHeightToImage();
     triggerProcessing(true);
   } catch (err) {
     showWarning('STL projection failed: ' + err.message, true);
+  }
+}
+
+// Called from the regenerate pipeline. Re-projects the STL only when the
+// requested render size differs from the last projection, then re-runs auto
+// crop / auto fit. Returns true when the source canvas was rebuilt.
+function maybeReprojectStl() {
+  if (state.inputType !== 'stl' || !state.stlData) return false;
+  const size = currentStlRenderSize();
+  if (size === state.lastStlRenderSize) return false;
+  try {
+    state.rawSourceCanvas = projectSTLToCanvas(state.stlData, state.stlSide, size);
+    state.lastStlRenderSize = size;
+    applyAutoCrop();
+    autoFitHeightToImage();
+    return true;
+  } catch (err) {
+    showWarning('STL projection failed: ' + err.message, true);
+    return false;
   }
 }
 
@@ -578,9 +627,10 @@ function onParamChange() {
 }
 
 function getTargetDims(params) {
-  // Cylindrical mode: image wraps onto an unrolled rectangle of size (πD × H).
-  // Polygon mode: each face gets the same image at (W × H) pixels per face.
-  const w = params.shape === 'cylindrical' ? Math.PI * params.plateW : params.plateW;
+  // Cylindrical mode: W is the per-tile arc width in mm. The unrolled
+  // rectangle is (W × tileX) wide so all tileX repetitions cover the full
+  // circumference. Polygon mode: W is the per-face side width.
+  const w = params.shape === 'cylindrical' ? params.plateW * params.tileX : params.plateW;
   const h = params.plateH;
   if (params.resolutionMode === 'density') {
     const d = params.density;
@@ -592,9 +642,9 @@ function getTargetDims(params) {
   return computeTargetDimensions(w, h, params.maxDim);
 }
 
-function estimateTrisForShape(targetW, targetH, shape, sides) {
+function estimateTrisForShape(targetW, targetH, shape, sides, hasChamfer) {
   if (shape === 'cylindrical') return estimateCylindricalTriangleCount(targetW, targetH);
-  if (shape === 'polygon') return estimatePolygonPrismTriangleCount(sides, targetW, targetH);
+  if (shape === 'polygon') return estimatePolygonPrismTriangleCount(sides, targetW, targetH, hasChamfer);
   return estimateTriangleCount(targetW, targetH);
 }
 
@@ -607,7 +657,7 @@ function triggerProcessing(immediate) {
 
   const params = readParamsFromUI();
   const { targetW, targetH } = getTargetDims(params);
-  const tris = estimateTrisForShape(targetW, targetH, params.shape, params.sides);
+  const tris = estimateTrisForShape(targetW, targetH, params.shape, params.sides, params.chamferTop > 0);
 
   if (tris > TRI_HARD_LIMIT) {
     showWarning(
@@ -638,18 +688,27 @@ els.regenBtn.addEventListener('click', () => regeneratePipeline());
 
 function regeneratePipeline() {
   if (!state.sourceCanvas) return;
+  maybeReprojectStl();
   const params = readParamsFromUI();
   const { targetW, targetH } = getTargetDims(params);
 
   // Convert margin mm → pixels using actual mm-to-pixel ratio for each axis.
-  const baseW = params.shape === 'cylindrical' ? Math.PI * params.plateW : params.plateW;
+  // For cylinder mode the unrolled width = plateW × tileX (matches getTargetDims).
+  const baseW = params.shape === 'cylindrical' ? params.plateW * params.tileX : params.plateW;
   const pxPerMmX = baseW > 0 ? targetW / baseW : 0;
   const pxPerMmY = params.plateH > 0 ? targetH / params.plateH : 0;
+  // Fill the margin / alpha-composite background with whichever color ends
+  // up at 0 relief after invert + mapDir, so the margin acts as a flat
+  // border instead of a raised one. (Brightness/contrast can still shift it.)
+  const lowReliefAfter = params.mapDir === 'black' ? 255 : 0;
+  const lowReliefBefore = params.invert ? 255 - lowReliefAfter : lowReliefAfter;
+  const fillColor = lowReliefBefore === 0 ? '#000000' : '#ffffff';
   const raster = rasterize(state.sourceCanvas, targetW, targetH, params.fitMode, {
     tileX: params.tileX,
     tileY: params.tileY,
     marginPxX: Math.round(params.marginX * pxPerMmX),
-    marginPxY: Math.round(params.marginY * pxPerMmY)
+    marginPxY: Math.round(params.marginY * pxPerMmY),
+    fillColor
   });
   const processed = processImage(raster, {
     brightness: params.brightness,
@@ -673,10 +732,13 @@ function regeneratePipeline() {
   let geom;
   try {
     if (params.shape === 'cylindrical') {
+      // Diameter is derived: image tile width × tileX wraps around once.
+      const D = (params.plateW * params.tileX) / Math.PI;
       geom = buildCylindricalGeometry(heightmap, {
-        diameter: params.plateW,
+        diameter: D,
         height: params.plateH,
-        baseThickness: params.baseThickness
+        baseThickness: params.baseThickness,
+        closedBottom: params.closedBottom
       });
     } else if (params.shape === 'polygon') {
       geom = buildPolygonPrismGeometry(heightmap, {
@@ -684,7 +746,8 @@ function regeneratePipeline() {
         height: params.plateH,
         baseThickness: params.baseThickness,
         sides: params.sides,
-        closedBottom: params.closedBottom
+        closedBottom: params.closedBottom,
+        chamferTop: params.chamferTop
       });
     } else {
       geom = buildReliefGeometry(heightmap, {
@@ -752,7 +815,8 @@ function exportFilename(ext, params) {
   const W = stripTrailing(params.plateW);
   const H = stripTrailing(params.plateH);
   if (params.shape === 'cylindrical') {
-    return `${name}_cyl_D${W}xH${H}_h${f}mm${c}.${ext}`;
+    const D = stripTrailing((params.plateW * params.tileX) / Math.PI);
+    return `${name}_cyl_D${D}xH${H}_h${f}mm${c}.${ext}`;
   }
   if (params.shape === 'polygon') {
     return `${name}_poly${params.sides}_W${W}xH${H}_h${f}mm${c}.${ext}`;

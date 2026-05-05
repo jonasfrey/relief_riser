@@ -18,24 +18,31 @@
         <div class="panel">
           <h2>1. Source image</h2>
           <div id="dropZone" class="drop-zone">
-            <p>Drop an image or .stl here, or</p>
+            <p>Drop an image, .stl or .glb here, or</p>
             <label class="btn">
               Choose file…
-              <input type="file" id="fileInput" accept="image/png,image/jpeg,image/webp,image/bmp,.stl,model/stl" hidden />
+              <input type="file" id="fileInput" accept="image/png,image/jpeg,image/webp,image/bmp,.stl,.glb,model/stl,model/gltf-binary" hidden />
             </label>
-            <p class="hint">PNG · JPG · WebP · BMP · STL — processed locally, never uploaded</p>
+            <p class="hint">PNG · JPG · WebP · BMP · STL · GLB — processed locally, never uploaded</p>
           </div>
 
-          <div class="control hidden" id="stlControls">
-            <label for="stlSide">STL view side</label>
-            <select id="stlSide">
-              <option value="front" selected>Front (+Y)</option>
-              <option value="back">Back (−Y)</option>
-              <option value="right">Right (+X)</option>
-              <option value="left">Left (−X)</option>
-              <option value="top">Top (+Z)</option>
-              <option value="bottom">Bottom (−Z)</option>
-            </select>
+          <div class="hidden" id="stlControls">
+            <div class="control">
+              <label for="stlSide">Mesh view side</label>
+              <select id="stlSide">
+                <option value="front" selected>Front (+Y)</option>
+                <option value="back">Back (−Y)</option>
+                <option value="right">Right (+X)</option>
+                <option value="left">Left (−X)</option>
+                <option value="top">Top (+Z)</option>
+                <option value="bottom">Bottom (−Z)</option>
+              </select>
+            </div>
+            <div class="control">
+              <label for="stlRenderSize">Mesh render size (px max)</label>
+              <input type="range" id="stlRenderSize" min="64" max="2048" step="32" value="600" />
+              <input type="number" id="stlRenderSizeNum" min="64" max="2048" step="32" value="600" />
+            </div>
           </div>
           <div class="control inline">
             <label>
@@ -189,6 +196,12 @@
               <input type="checkbox" id="closedBottom" checked />
               Closed bottom (solid floor of thickness = base)
             </label>
+          </div>
+
+          <div class="control hidden" id="chamferTopControl">
+            <label for="chamferTop">Top chamfer (mm)</label>
+            <input type="range" id="chamferTop" min="0" max="5" step="0.1" value="0" />
+            <input type="number" id="chamferTopNum" min="0" max="5" step="0.1" value="0" />
           </div>
 
           <div class="control">

@@ -22,24 +22,27 @@ export function computeTargetDimensions(plateW, plateH, maxDim) {
 }
 
 // Render the source onto a target-sized canvas, applying tiling, margin,
-// fit/stretch, and compositing onto a white background (so alpha channels and
-// the margin become "low" relief).
+// fit/stretch, and compositing onto a background fill (default white). The
+// fill color is what alpha channels and the margin band end up as before
+// height mapping — pass `fillColor` so it lands at 0 relief.
 //
 // opts:
 //   tileX, tileY       — repeat counts (default 1; >1 tiles the source inside the drawing area)
 //   marginPxX, marginPxY — flat-relief border width in pixels on each side
+//   fillColor          — CSS color used for margin / out-of-image-bounds (default '#ffffff')
 export function rasterize(sourceCanvas, targetW, targetH, fitMode, opts = {}) {
   const tileX = Math.max(1, opts.tileX | 0 || 1);
   const tileY = Math.max(1, opts.tileY | 0 || 1);
   const marginPxX = Math.max(0, Math.round(opts.marginPxX || 0));
   const marginPxY = Math.max(0, Math.round(opts.marginPxY || 0));
+  const fillColor = opts.fillColor || '#ffffff';
 
   const canvas = document.createElement('canvas');
   canvas.width = targetW;
   canvas.height = targetH;
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
 
-  ctx.fillStyle = 'white';
+  ctx.fillStyle = fillColor;
   ctx.fillRect(0, 0, targetW, targetH);
 
   const innerW = targetW - 2 * marginPxX;

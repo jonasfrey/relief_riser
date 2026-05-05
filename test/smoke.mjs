@@ -147,6 +147,7 @@ function checkCylinderNormals(geom, opts) {
   const { positions, indices, Nx, Ny } = geom;
   const triCount = indices.length / 3;
   const innerOffset = Nx * Ny;
+  const centerStart = 2 * Nx * Ny;
   const eps = 1e-3;
   const H = opts.height;
   let bad = 0;
@@ -163,20 +164,34 @@ function checkCylinderNormals(geom, opts) {
     const ny = uz * vx - ux * vz;
     const nz = ux * vy - uy * vx;
 
-    const aIn = ia >= innerOffset, bIn = ib >= innerOffset, cIn = ic >= innerOffset;
-    const allOut = !aIn && !bIn && !cIn;
-    const allIn = aIn && bIn && cIn;
+    const isOuter = (idx) => idx < innerOffset;
+    const isInner = (idx) => idx >= innerOffset && idx < centerStart;
+    const isCenter = (idx) => idx >= centerStart;
+    const ouN  = (isOuter(ia)  ? 1 : 0) + (isOuter(ib)  ? 1 : 0) + (isOuter(ic)  ? 1 : 0);
+    const inN  = (isInner(ia)  ? 1 : 0) + (isInner(ib)  ? 1 : 0) + (isInner(ic)  ? 1 : 0);
+    const cN   = (isCenter(ia) ? 1 : 0) + (isCenter(ib) ? 1 : 0) + (isCenter(ic) ? 1 : 0);
+
+    const minZ = Math.min(az, bz, ccz);
+    const maxZ = Math.max(az, bz, ccz);
+    const planar = maxZ - minZ < eps;
 
     let comp;
-    if (allOut || allIn) {
+    if (cN === 1 && ouN === 2) {
+      // Bottom face (closed mode): expect −Z at z=0
+      if (!planar || Math.abs(maxZ) > eps) { bad++; continue; }
+      comp = -nz;
+    } else if (cN === 1 && inN === 2) {
+      // Inner floor disc (closed mode): expect +Z at z=B
+      if (!planar) { bad++; continue; }
+      comp = nz;
+    } else if (ouN === 3 || inN === 3) {
       const tcx = (ax + bx + ccx) / 3, tcy = (ay + by + ccy) / 3;
       const len = Math.sqrt(tcx * tcx + tcy * tcy) || 1;
       const radial = (nx * tcx + ny * tcy) / len;
-      comp = allOut ? radial : -radial;
+      comp = (ouN === 3) ? radial : -radial;
     } else {
-      const minZ = Math.min(az, bz, ccz);
-      const maxZ = Math.max(az, bz, ccz);
-      if (maxZ - minZ > eps) { bad++; continue; }
+      // mixed inner+outer = annular cap (top at z=H +Z, bottom at z=0 −Z)
+      if (!planar) { bad++; continue; }
       if (Math.abs(maxZ - H) < eps) comp = nz;
       else if (Math.abs(maxZ) < eps) comp = -nz;
       else { bad++; continue; }
@@ -198,20 +213,39 @@ function checkCyl(Nx, Ny, opts, fillFn) {
   }
   const m = checkManifold(geom);
   const bad = checkCylinderNormals(geom, opts);
+  const euler = geom.vertCount - m.uniqueEdges + m.triCount;
+  const expectedEuler = opts.closedBottom === false ? 0 : 2;
+  const tag = opts.closedBottom === false ? 'open' : 'closed';
   console.log(
-    `cyl ${Nx}x${Ny}: tris=${m.triCount} edges=${m.uniqueEdges} ` +
-    `nonManifold=${m.nonManifold} boundary=${m.boundary} inwardNormals=${bad}`
+    `cyl ${tag} ${Nx}x${Ny}: V=${geom.vertCount} E=${m.uniqueEdges} F=${m.triCount} ` +
+    `nonManifold=${m.nonManifold} boundary=${m.boundary} χ=${euler} badNormals=${bad}`
   );
   if (m.nonManifold !== 0) throw new Error('cyl: non-manifold edges');
   if (m.boundary !== 0) throw new Error('cyl: boundary edges (not watertight)');
+  if (euler !== expectedEuler) throw new Error(`cyl: expected χ=${expectedEuler} got ${euler}`);
   if (bad !== 0) throw new Error('cyl: wrong-direction normals');
 }
 
-const cylOpts = { diameter: 30, height: 40, baseThickness: 1.5 };
-checkCyl(4, 2, cylOpts);
-checkCyl(8, 6, cylOpts);
-checkCyl(16, 12, cylOpts);
-checkCyl(64, 32, cylOpts, (i, j) => 0.6 * Math.sin(i * 0.5) * Math.cos(j * 0.3));
+const cylOpenOpts = { diameter: 30, height: 40, baseThickness: 1.5, closedBottom: false };
+checkCyl(4, 2, cylOpenOpts);
+checkCyl(8, 6, cylOpenOpts);
+checkCyl(16, 12, cylOpenOpts);
+checkCyl(64, 32, cylOpenOpts, (i, j) => 0.6 * Math.sin(i * 0.5) * Math.cos(j * 0.3));
+
+const cylClosedOpts = { diameter: 30, height: 40, baseThickness: 1.5 };
+checkCyl(4, 2, cylClosedOpts);
+checkCyl(8, 6, cylClosedOpts);
+checkCyl(16, 12, cylClosedOpts);
+checkCyl(64, 32, cylClosedOpts, (i, j) => 0.6 * Math.sin(i * 0.5) * Math.cos(j * 0.3));
+
+// Closed bottom with B >= H must error
+try {
+  buildCylindricalGeometry({ data: new Float32Array(8), width: 4, height: 2 }, { diameter: 10, height: 5, baseThickness: 5 });
+  throw new Error('expected throw for B >= H with closed bottom');
+} catch (e) {
+  if (!/Base thickness/.test(e.message)) throw e;
+  console.log('cyl: rejects B >= H with closed bottom ✓');
+}
 
 // Reject impossible geometry
 try {
@@ -225,27 +259,15 @@ try {
 // ---- polygon prism mesh checks ----
 
 function checkPolyNormals(geom, opts) {
-  const { positions, indices, Nx, Ny, sides, innerCount, outerStart } = geom;
-  const N = sides;
+  const { positions, indices, innerCount, NxRing, Ny, chamferCount = 0 } = geom;
   const triCount = indices.length / 3;
   const eps = 1e-3;
   const H = opts.height;
-
-  const cosT = new Float32Array(N), sinT = new Float32Array(N);
-  for (let k = 0; k < N; k++) {
-    cosT[k] = Math.cos((k * 2 * Math.PI) / N);
-    sinT[k] = Math.sin((k * 2 * Math.PI) / N);
-  }
-
-  const outerEnd = outerStart[N - 1] + Nx * Ny;
-  function faceFor(idx) {
-    if (idx < innerCount) return -1;
-    if (idx >= outerEnd) return -3;       // closed-bottom center vertex
-    for (let k = 0; k < N; k++) {
-      if (idx >= outerStart[k] && idx < outerStart[k] + Nx * Ny) return k;
-    }
-    return -2;
-  }
+  const outerStart = innerCount;
+  const outerEnd = innerCount + NxRing * Ny;
+  const chamferStart = outerEnd;
+  const chamferEnd = chamferStart + chamferCount;
+  const centerBase = chamferEnd;
 
   let bad = 0;
   for (let t = 0; t < triCount; t++) {
@@ -260,46 +282,51 @@ function checkPolyNormals(geom, opts) {
     const ny = uz * vx - ux * vz;
     const nz = ux * vy - uy * vx;
 
-    const fa = faceFor(ia), fb = faceFor(ib), fc = faceFor(ic);
-    const hasCenter = fa === -3 || fb === -3 || fc === -3;
-    const allInner = !hasCenter && fa < 0 && fb < 0 && fc < 0;
-    const allOuter = fa >= 0 && fb >= 0 && fc >= 0;
-    const sameFace = allOuter && fa === fb && fb === fc;
+    const isInner = (idx) => idx < outerStart;
+    const isOuter = (idx) => idx >= outerStart && idx < outerEnd;
+    const isChamfer = (idx) => idx >= chamferStart && idx < chamferEnd;
+    const isCenter = (idx) => idx >= centerBase;
+    const inN  = (isInner(ia) ? 1 : 0)   + (isInner(ib) ? 1 : 0)   + (isInner(ic) ? 1 : 0);
+    const ouN  = (isOuter(ia) ? 1 : 0)   + (isOuter(ib) ? 1 : 0)   + (isOuter(ic) ? 1 : 0);
+    const cmN  = (isChamfer(ia) ? 1 : 0) + (isChamfer(ib) ? 1 : 0) + (isChamfer(ic) ? 1 : 0);
+    const cN   = (isCenter(ia) ? 1 : 0)  + (isCenter(ib) ? 1 : 0)  + (isCenter(ic) ? 1 : 0);
+
+    const minZ = Math.min(az, bz, ccz);
+    const maxZ = Math.max(az, bz, ccz);
+    const planar = maxZ - minZ < eps;
 
     let comp;
-    if (hasCenter) {
-      // Bottom face (z=0, −Z) or inner floor disc (z=B, +Z)
-      const minZ = Math.min(az, bz, ccz);
-      const maxZ = Math.max(az, bz, ccz);
-      if (maxZ - minZ > eps) { bad++; continue; }
-      comp = (Math.abs(maxZ) < eps) ? -nz : nz;
-    } else if (allInner) {
+    if (cN === 1 && ouN === 2) {
+      if (!planar || Math.abs(maxZ) > eps) { bad++; continue; }
+      comp = -nz;                             // bottom face, expect −Z
+    } else if (cN === 1 && inN === 2) {
+      if (!planar) { bad++; continue; }
+      comp = nz;                              // inner floor disc, expect +Z
+    } else if (inN === 3) {
       const tcx = (ax + bx + ccx) / 3, tcy = (ay + by + ccy) / 3;
       const len = Math.sqrt(tcx * tcx + tcy * tcy) || 1;
-      comp = -(nx * tcx + ny * tcy) / len;  // expect inward
-    } else if (sameFace) {
-      // outer face surface — normal should point along +n_k
-      comp = nx * cosT[fa] + ny * sinT[fa];
+      comp = -(nx * tcx + ny * tcy) / len;    // inner surface, inward radial
+    } else if (ouN === 3) {
+      const tcx = (ax + bx + ccx) / 3, tcy = (ay + by + ccy) / 3;
+      const len = Math.sqrt(tcx * tcx + tcy * tcy) || 1;
+      comp = (nx * tcx + ny * tcy) / len;     // outer surface, outward radial
+    } else if (cmN > 0 && cmN + ouN === 3) {
+      // Chamfer band: outward radial AND +Z (slope tilts outward and up).
+      const tcx = (ax + bx + ccx) / 3, tcy = (ay + by + ccy) / 3;
+      const len = Math.sqrt(tcx * tcx + tcy * tcy) || 1;
+      const radial = (nx * tcx + ny * tcy) / len;
+      if (radial <= 0 || nz <= 0) { bad++; continue; }
+      comp = Math.min(radial, nz);
+    } else if (cmN > 0 && cmN + inN === 3) {
+      // Top edge wall when chamfer is enabled (chamfer ring → inner top, +Z).
+      if (!planar || Math.abs(maxZ - H) > eps) { bad++; continue; }
+      comp = nz;
     } else {
-      // mix of inner/outer or different outer faces — must be a cap (top/bottom z),
-      // an edge wall, a seam wall (between adjacent outer faces), or a corner triangle.
-      const minZ = Math.min(az, bz, ccz);
-      const maxZ = Math.max(az, bz, ccz);
-      if (maxZ - minZ < eps) {
-        // planar-in-z triangle: top cap (+Z), bottom face (−Z), or the inner
-        // floor disc at z=B which faces +Z into the inner void above it.
-        if (Math.abs(maxZ - H) < eps) comp = nz;
-        else if (Math.abs(maxZ) < eps) comp = -nz;
-        else comp = nz; // mid-height planar => inner floor disc, expects +Z
-      } else if (allOuter && (fa !== fb || fa !== fc)) {
-        // seam wall — vertices span ≥2 adjacent faces; outward normal is in
-        // the corner-bisector direction (positive radial component).
-        const tcx = (ax + bx + ccx) / 3, tcy = (ay + by + ccy) / 3;
-        const len = Math.sqrt(tcx * tcx + tcy * tcy) || 1;
-        comp = (nx * tcx + ny * tcy) / len;
-      } else {
-        bad++; continue;
-      }
+      // Mixed inner+outer = annular edge wall at z=H (+Z) or z=0 (−Z).
+      if (!planar) { bad++; continue; }
+      if (Math.abs(maxZ - H) < eps) comp = nz;
+      else if (Math.abs(maxZ) < eps) comp = -nz;
+      else { bad++; continue; }
     }
     if (comp <= 0) bad++;
   }
@@ -312,7 +339,7 @@ function checkPoly(N, Nx, Ny, opts, fillFn) {
     data[i + j * Nx] = fillFn ? fillFn(i, j) : 0.4 * (((i + j) & 1) ? 1 : 0);
   }
   const geom = buildPolygonPrismGeometry({ data, width: Nx, height: Ny }, { ...opts, sides: N });
-  const expected = estimatePolygonPrismTriangleCount(N, Nx, Ny);
+  const expected = estimatePolygonPrismTriangleCount(N, Nx, Ny, (opts.chamferTop || 0) > 0);
   if (geom.triCount !== expected) {
     throw new Error(`poly tri count mismatch: ${geom.triCount} vs ${expected}`);
   }
@@ -356,5 +383,13 @@ try {
   if (!/Base thickness/.test(e.message)) throw e;
   console.log('poly: rejects B >= H with closed bottom ✓');
 }
+
+// Chamfered top: triangle count grows by 2·NxRing, mesh stays watertight,
+// Euler χ unchanged (sphere when closed, torus when open).
+const polyChamferOpts = { sideWidth: 20, height: 20, baseThickness: 1.5, chamferTop: 0.8 };
+checkPoly(4, 6, 6, polyChamferOpts);
+checkPoly(6, 8, 8, polyChamferOpts);
+checkPoly(4, 12, 12, { ...polyChamferOpts, closedBottom: false });
+checkPoly(8, 16, 12, polyChamferOpts, (i, j) => 0.4 * Math.sin(i * 0.3) * Math.cos(j * 0.4));
 
 console.log('OK — all geometry checks passed');

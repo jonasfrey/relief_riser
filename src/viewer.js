@@ -4,6 +4,25 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 export class Viewer {
   constructor(container) {
     this.container = container;
+    this._broken = false;
+    this._raf = 0;
+    this.show = { solid: true, wireframe: false, vertices: false };
+
+    // Try to create the WebGL context. The browser can refuse if there are
+    // already too many active WebGL contexts on the page or if a previous
+    // context loss is still being throttled — fall back to a friendly
+    // placeholder instead of crashing the whole app.
+    try {
+      this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+    } catch (err) {
+      this._installContextLossPlaceholder(err);
+      return;
+    }
+    this._setupScene();
+  }
+
+  _setupScene() {
+    const container = this.container;
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x16171b);
 
@@ -14,21 +33,32 @@ export class Viewer {
     this.camera.up.set(0, 0, 1);
     this.camera.position.set(60, -60, 60);
 
-    this.renderer = new THREE.WebGLRenderer({ antialias: true });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.setSize(w, h);
     container.appendChild(this.renderer.domElement);
+
+    // Listen for runtime context loss / restore so a transient GPU hiccup
+    // doesn't permanently break the viewport.
+    this.renderer.domElement.addEventListener('webglcontextlost', (e) => {
+      e.preventDefault();
+      this._broken = true;
+      cancelAnimationFrame(this._raf);
+      this._showOverlay('WebGL context lost — usually caused by GPU memory pressure. Reduce the mesh resolution or reload the page.');
+    }, false);
+    this.renderer.domElement.addEventListener('webglcontextrestored', () => {
+      this._broken = false;
+      this._hideOverlay();
+      this._animate();
+    }, false);
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.08;
 
     this.scene.add(new THREE.AmbientLight(0xffffff, 0.5));
-
     const key = new THREE.DirectionalLight(0xffffff, 0.85);
     key.position.set(80, -60, 120);
     this.scene.add(key);
-
     const fill = new THREE.DirectionalLight(0xffffff, 0.35);
     fill.position.set(-60, 80, 70);
     this.scene.add(fill);
@@ -41,32 +71,15 @@ export class Viewer {
     axis.position.set(0, 0, 0.01);
     this.scene.add(axis);
 
-    // Display toggles. Defaults match the UI's initial state.
-    this.show = { solid: true, wireframe: false, vertices: false };
-
-    // Reusable materials. polygonOffset on the solid pushes its faces back so
-    // the wireframe overlay renders cleanly on top without z-fighting.
     this.solidMaterial = new THREE.MeshStandardMaterial({
-      color: 0xd4d6dc,
-      roughness: 0.65,
-      metalness: 0.05,
-      flatShading: false,
-      polygonOffset: true,
-      polygonOffsetFactor: 1,
-      polygonOffsetUnits: 1
+      color: 0xd4d6dc, roughness: 0.65, metalness: 0.05, flatShading: false,
+      polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1
     });
     this.wireMaterial = new THREE.MeshBasicMaterial({
-      color: 0x00ddaa,
-      wireframe: true,
-      transparent: true,
-      opacity: 0.65,
-      depthWrite: false
+      color: 0x00ddaa, wireframe: true, transparent: true, opacity: 0.65, depthWrite: false
     });
     this.pointsMaterial = new THREE.PointsMaterial({
-      color: 0xff8a44,
-      size: 3,
-      sizeAttenuation: false,
-      depthWrite: false
+      color: 0xff8a44, size: 3, sizeAttenuation: false, depthWrite: false
     });
 
     this.solidMesh = null;
@@ -83,7 +96,58 @@ export class Viewer {
     this._animate();
   }
 
+  _installContextLossPlaceholder(err) {
+    this._broken = true;
+    const msg = (err && err.message) || 'WebGL context could not be created.';
+    this._showOverlay(
+      `WebGL is unavailable: ${msg}<br><br>` +
+      `Common causes: too many WebGL contexts on the page, GPU out of memory ` +
+      `from a previous very large mesh, or hardware acceleration disabled.<br><br>` +
+      `Try closing other tabs that use 3D / WebGL, then reload this page.`,
+      true
+    );
+  }
+
+  _showOverlay(html, withReload = false) {
+    if (!this._overlay) {
+      this._overlay = document.createElement('div');
+      this._overlay.style.cssText = `
+        position: absolute; inset: 0; display: flex; align-items: center;
+        justify-content: center; padding: 1rem; text-align: center;
+        background: rgba(22, 23, 27, 0.92); color: #ff8a44; z-index: 5;
+        pointer-events: auto;`;
+      const wrap = document.createElement('div');
+      wrap.style.cssText = 'max-width: 460px; font-size: 0.9rem; line-height: 1.5;';
+      this._overlay.appendChild(wrap);
+      this._overlayBody = wrap;
+      // Make sure the parent positions us correctly.
+      if (getComputedStyle(this.container).position === 'static') {
+        this.container.style.position = 'relative';
+      }
+      this.container.appendChild(this._overlay);
+    }
+    let inner = `<div style="font-weight:600; margin-bottom:0.5rem;">3D viewport unavailable</div>` +
+                `<div style="color:#d4d6dc;">${html}</div>`;
+    if (withReload) {
+      inner += `<button id="__reloadBtn" style="margin-top:1rem; padding:0.4rem 0.8rem; ` +
+               `background:#6c8cff; color:white; border:0; border-radius:4px; cursor:pointer;">` +
+               `Reload page</button>`;
+    }
+    this._overlayBody.innerHTML = inner;
+    const btn = this._overlayBody.querySelector('#__reloadBtn');
+    if (btn) btn.addEventListener('click', () => location.reload());
+  }
+
+  _hideOverlay() {
+    if (this._overlay && this._overlay.parentNode) {
+      this._overlay.parentNode.removeChild(this._overlay);
+    }
+    this._overlay = null;
+    this._overlayBody = null;
+  }
+
   _onResize() {
+    if (this._broken) return;
     const w = this.container.clientWidth;
     const h = this.container.clientHeight;
     if (w === 0 || h === 0) return;
@@ -93,6 +157,7 @@ export class Viewer {
   }
 
   setMesh(positions, indices) {
+    if (this._broken) return;
     this._disposeMeshes();
 
     const geom = new THREE.BufferGeometry();
@@ -121,6 +186,7 @@ export class Viewer {
 
   setVisibility(key, visible) {
     this.show[key] = !!visible;
+    if (this._broken) return;
     const obj = key === 'solid' ? this.solidMesh
               : key === 'wireframe' ? this.wireMesh
               : key === 'vertices' ? this.pointsObj
@@ -129,6 +195,7 @@ export class Viewer {
   }
 
   _disposeMeshes() {
+    if (!this.scene) return;
     if (this.solidMesh)  { this.scene.remove(this.solidMesh);  this.solidMesh  = null; }
     if (this.wireMesh)   { this.scene.remove(this.wireMesh);   this.wireMesh   = null; }
     if (this.pointsObj)  { this.scene.remove(this.pointsObj);  this.pointsObj  = null; }
@@ -136,7 +203,7 @@ export class Viewer {
   }
 
   frame() {
-    if (!this._sharedGeometry) return;
+    if (this._broken || !this._sharedGeometry) return;
     const box = this._sharedGeometry.boundingBox;
     if (!box) return;
     const size = new THREE.Vector3();
@@ -159,18 +226,26 @@ export class Viewer {
   }
 
   _animate() {
+    if (this._broken) return;
     this._raf = requestAnimationFrame(this._animate);
     this.controls.update();
-    this.renderer.render(this.scene, this.camera);
+    try {
+      this.renderer.render(this.scene, this.camera);
+    } catch (err) {
+      this._broken = true;
+      cancelAnimationFrame(this._raf);
+      this._showOverlay(`Render failed: ${err && err.message || err}. Try reducing mesh resolution or reload the page.`, true);
+    }
   }
 
   dispose() {
     cancelAnimationFrame(this._raf);
-    this._ro.disconnect();
+    if (this._ro) this._ro.disconnect();
     this._disposeMeshes();
-    this.solidMaterial.dispose();
-    this.wireMaterial.dispose();
-    this.pointsMaterial.dispose();
-    this.renderer.dispose();
+    if (this.solidMaterial) this.solidMaterial.dispose();
+    if (this.wireMaterial) this.wireMaterial.dispose();
+    if (this.pointsMaterial) this.pointsMaterial.dispose();
+    if (this.renderer) this.renderer.dispose();
+    this._hideOverlay();
   }
 }

@@ -14,12 +14,13 @@ export function estimateCylindricalTriangleCount(Nx, Ny) {
   return 4 * Nx * Ny;
 }
 
-export function estimatePolygonPrismTriangleCount(N, NxPerFace, Ny) {
-  // Per face outer + shared inner: 4N(Nx-1)(Ny-1)
-  // Top + bottom edge walls per face: 4N(Nx-1)
-  // Outer seam wall per corner: 2N(Ny-1)
-  // Top + bottom corner closing triangles: 2N
-  return 2 * N * Ny * (2 * NxPerFace - 1);
+export function estimatePolygonPrismTriangleCount(N, NxPerFace, Ny, hasChamfer) {
+  // With shared outer corners the outer is also a single closed ring. Both
+  // inner and outer rings have NxRing = N·(Nx−1) vertices around. Surface =
+  // 4·NxRing·(Ny−1); top + bottom caps (open) or bottom face + inner floor
+  // disc (closed) = 4·NxRing. The optional top chamfer adds 2·NxRing more.
+  const NxRing = N * (NxPerFace - 1);
+  return 4 * NxRing * Ny + (hasChamfer ? 2 * NxRing : 0);
 }
 
 export function buildReliefGeometry(heightmap, opts) {
@@ -146,14 +147,18 @@ export function buildReliefGeometry(heightmap, opts) {
   };
 }
 
-// Build an open-ended thick-walled cylinder ("vase / lantern" shape) where
-// the outer surface carries the relief mapped via polar coordinates and the
-// inner surface is a smooth cylinder at radius D/2 - baseThickness.
+// Build a thick-walled cylinder where the outer surface carries the relief
+// mapped via polar coordinates and the inner surface is smooth at radius
+// D/2 − baseThickness.
 //
 // The cylinder axis is the Z axis. The model rests on Z=0 and rises to Z=H.
 // The image's pixel column 0 corresponds to angle θ=0 and increases CCW
-// (looking from +Z); pixel row 0 corresponds to z=H. The two ends are open
-// annular caps (top + bottom rings between R_inner and R_base+relief).
+// (looking from +Z); pixel row 0 corresponds to z=H.
+//
+// closedBottom (default true): inner surface stops at z=B; the bottom is a
+// solid disc at z=0 plus an inner floor disc at z=B sealing the inner void
+// (sphere topology). Open mode keeps the original annular bottom cap and
+// both ends open through the central axis (torus topology).
 export function buildCylindricalGeometry(heightmap, opts) {
   const Nx = heightmap.width;
   const Ny = heightmap.height;
@@ -164,13 +169,19 @@ export function buildCylindricalGeometry(heightmap, opts) {
   const D = opts.diameter;
   const H = opts.height;
   const B = opts.baseThickness;
+  const closedBottom = opts.closedBottom !== false;
   const Rbase = D / 2;
   const Rinner = Rbase - B;
   if (Rinner <= 0) {
     throw new Error(`Base thickness (${B}) must be smaller than D/2 (${Rbase})`);
   }
+  if (closedBottom && B >= H) {
+    throw new Error('Base thickness must be smaller than height for closed bottom');
+  }
 
-  const totalVerts = 2 * Nx * Ny;
+  const innerZBottom = closedBottom ? B : 0;
+  const extraVerts = closedBottom ? 2 : 0;
+  const totalVerts = 2 * Nx * Ny + extraVerts;
   const positions = new Float32Array(totalVerts * 3);
   const innerOffset = Nx * Ny;
 
@@ -193,15 +204,29 @@ export function buildCylindricalGeometry(heightmap, opts) {
       positions[vi + 2] = z;
     }
   }
-  // Inner surface (constant radius)
+  // Inner surface (constant radius). z range is [innerZBottom, H] so the
+  // closed-bottom case has the inner surface stop at the top of the floor.
   for (let j = 0; j < Ny; j++) {
-    const z = H - (j / (Ny - 1)) * H;
+    const z = H - (j / (Ny - 1)) * (H - innerZBottom);
     for (let i = 0; i < Nx; i++) {
       const vi = (innerOffset + i + j * Nx) * 3;
       positions[vi]     = Rinner * cosT[i];
       positions[vi + 1] = Rinner * sinT[i];
       positions[vi + 2] = z;
     }
+  }
+
+  // Center vertices for closed-bottom mode
+  const centerBase = 2 * Nx * Ny;
+  const bottomCenter = closedBottom ? centerBase : -1;
+  const floorCenter  = closedBottom ? centerBase + 1 : -1;
+  if (closedBottom) {
+    positions[bottomCenter * 3]     = 0;
+    positions[bottomCenter * 3 + 1] = 0;
+    positions[bottomCenter * 3 + 2] = 0;
+    positions[floorCenter * 3]      = 0;
+    positions[floorCenter * 3 + 1]  = 0;
+    positions[floorCenter * 3 + 2]  = B;
   }
 
   const triCount = estimateCylindricalTriangleCount(Nx, Ny);
@@ -238,12 +263,27 @@ export function buildCylindricalGeometry(heightmap, opts) {
     indices[p++] = a; indices[p++] = b; indices[p++] = c;
     indices[p++] = a; indices[p++] = c; indices[p++] = d;
   }
-  // Bottom cap (j=Ny-1, z=0, normal -Z): reverse winding
-  for (let i = 0; i < Nx; i++) {
-    const a = outer(i, Ny - 1),     b = outer(i + 1, Ny - 1);
-    const c = inner(i + 1, Ny - 1), d = inner(i, Ny - 1);
-    indices[p++] = a; indices[p++] = c; indices[p++] = b;
-    indices[p++] = a; indices[p++] = d; indices[p++] = c;
+  if (!closedBottom) {
+    // Bottom cap (j=Ny-1, z=0, normal -Z): reverse winding annular ring.
+    for (let i = 0; i < Nx; i++) {
+      const a = outer(i, Ny - 1),     b = outer(i + 1, Ny - 1);
+      const c = inner(i + 1, Ny - 1), d = inner(i, Ny - 1);
+      indices[p++] = a; indices[p++] = c; indices[p++] = b;
+      indices[p++] = a; indices[p++] = d; indices[p++] = c;
+    }
+  } else {
+    // Closed bottom: solid disc at z=0 (normal -Z) + inner floor disc at z=B
+    // (normal +Z) sealing the inner void.
+    for (let i = 0; i < Nx; i++) {
+      const a = outer(i,     Ny - 1);
+      const b = outer(i + 1, Ny - 1);
+      indices[p++] = bottomCenter; indices[p++] = b; indices[p++] = a;
+    }
+    for (let i = 0; i < Nx; i++) {
+      const i0 = inner(i,     Ny - 1);
+      const i1 = inner(i + 1, Ny - 1);
+      indices[p++] = floorCenter; indices[p++] = i0; indices[p++] = i1;
+    }
   }
 
   return {
@@ -256,19 +296,21 @@ export function buildCylindricalGeometry(heightmap, opts) {
   };
 }
 
-// Build an open-ended N-sided polygon prism ("hollow box") where each of the
-// N flat outer faces carries the SAME relief image. Inner is a smooth N-gon
-// at perpendicular distance `apothem` from the axis; outer face k is at
-// distance `apothem + baseThickness + relief(face-local i, j)` along its own
-// normal. The mesh is watertight (torus topology, like the cylinder mode).
+// Build an N-sided polygon prism ("hollow box") where each flat outer face
+// carries the same relief image. Both inner and outer surfaces are a
+// SINGLE shared closed ring of N·(Nx−1) vertices around — adjacent faces
+// share the polygon-corner vertex, so the outer surface meets at sharp
+// polygon edges with no protrusion / bevel. The relief at the corner
+// vertices is forced to 0 so the corner sits exactly on the polygon
+// outer corner; image content right at column 0 / column Nx−1 fades to
+// flat there. Use the *Margin X* control if you want a wider clean
+// transition than a single column at the corner.
 //
-// Per face the outer grid is independent so each face can show the full
-// image. The inner ring is a single shared closed loop — its corners
-// coincide geometrically (no relief there), so sharing avoids degenerate
-// triangles. The outer seam at each polygon corner is closed by a quad
-// strip (joining the two adjacent outer right/left edges) plus one corner
-// triangle at the top and one at the bottom that bridges the inner corner
-// vertex to the two outer corner vertices.
+// Convention: `sideWidth` is the OUTER side length. Wall thickness B sits
+// inward, so the inner side length = 2·(W/(2·tan(π/N)) − B)·tan(π/N).
+//
+// closedBottom (default true): the inner surface stops at z=B and a flat
+// floor seals the bottom. Open mode = annular bottom cap, like the cylinder.
 export function buildPolygonPrismGeometry(heightmap, opts) {
   const Nx = heightmap.width;        // vertices per face along the side width
   const Ny = heightmap.height;       // vertices along Z
@@ -276,23 +318,38 @@ export function buildPolygonPrismGeometry(heightmap, opts) {
     throw new Error('Polygon prism heightmap must be at least 2x2');
   }
   const N = Math.max(3, Math.min(64, opts.sides | 0));
-  const W = opts.sideWidth;
+  const W = opts.sideWidth;        // OUTER side length
   const H = opts.height;
   const B = opts.baseThickness;
-  // Default closed (sealed floor of thickness B). When false, the bottom is
-  // an annular cap like the cylinder mode.
   const closedBottom = opts.closedBottom !== false;
-  const apothem = W / (2 * Math.tan(Math.PI / N));
-  if (!(apothem > 0)) throw new Error('Invalid polygon parameters');
-  if (closedBottom && B >= H) throw new Error('Base thickness must be smaller than height for closed bottom');
 
-  const NxInner = N * (Nx - 1);            // shared inner ring vertex count
-  const innerCount = NxInner * Ny;
-  const outerCount = N * Nx * Ny;
-  // Closed bottom adds 2 vertices: bottom-face center at (0,0,0) and inner-
-  // floor-disc center at (0,0,B).
+  const tanHalfAngle = Math.tan(Math.PI / N);
+  const outerApothem = W / (2 * tanHalfAngle);
+  const innerApothem = outerApothem - B;
+  if (!(innerApothem > 0)) {
+    throw new Error('Base thickness must be smaller than apothem (W / (2·tan(π/N)))');
+  }
+  if (closedBottom && B >= H) {
+    throw new Error('Base thickness must be smaller than height for closed bottom');
+  }
+  const Winner = 2 * innerApothem * tanHalfAngle;
+
+  // Optional 45° top chamfer: cuts back the perpendicular distance by
+  // `chamferTop` (mm) and lowers the top of the relief surface by the same
+  // amount. Constrained so the chamfer can't punch through to the inner
+  // surface or eat the whole relief height.
+  const innerZBottom = closedBottom ? B : 0;
+  const chamferRaw = Math.max(0, Number(opts.chamferTop) || 0);
+  const chamferTop = Math.min(chamferRaw, B * 0.95, (H - innerZBottom) * 0.4);
+  const hasChamfer = chamferTop > 0;
+  const outerZTop = H - chamferTop;
+
+  const NxRing = N * (Nx - 1);            // shared ring vertex count (both rings)
+  const innerCount = NxRing * Ny;
+  const outerCount = NxRing * Ny;
+  const chamferCount = hasChamfer ? NxRing : 0;
   const extraVerts = closedBottom ? 2 : 0;
-  const totalVerts = innerCount + outerCount + extraVerts;
+  const totalVerts = innerCount + outerCount + chamferCount + extraVerts;
   const positions = new Float32Array(totalVerts * 3);
 
   const cosT = new Float32Array(N);
@@ -303,29 +360,91 @@ export function buildPolygonPrismGeometry(heightmap, opts) {
     sinT[k] = Math.sin(t);
   }
 
-  // Inner ring vertices. Each global ring index maps to (face, face-local col).
-  // For closed bottom the inner surface stops at z=B (top of the floor) so
-  // the bottom B mm is solid material.
-  const innerZBottom = closedBottom ? B : 0;
+  // Inner ring (shared closed loop, inner side length, inner apothem).
   for (let j = 0; j < Ny; j++) {
     const z = H - (j / (Ny - 1)) * (H - innerZBottom);
-    for (let i = 0; i < NxInner; i++) {
+    for (let i = 0; i < NxRing; i++) {
       const k = Math.floor(i / (Nx - 1));
       const col = i - k * (Nx - 1);
-      const s = (col / (Nx - 1)) * W - W / 2;
+      const s = (col / (Nx - 1)) * Winner - Winner / 2;
       const cT = cosT[k], sT = sinT[k];
-      const x = apothem * cT + s * (-sT);
-      const y = apothem * sT + s * cT;
-      const vi = (i + j * NxInner) * 3;
+      const x = innerApothem * cT - s * sT;
+      const y = innerApothem * sT + s * cT;
+      const vi = (i + j * NxRing) * 3;
       positions[vi]     = x;
       positions[vi + 1] = y;
       positions[vi + 2] = z;
     }
   }
 
-  // Center vertices for closed-bottom mode
-  const bottomCenter = closedBottom ? innerCount + outerCount : -1;
-  const floorCenter  = closedBottom ? innerCount + outerCount + 1 : -1;
+  // Outer ring (shared closed loop, outer side length, outer apothem).
+  // Corner vertices (col == 0) get relief = 0 so they sit exactly on the
+  // polygon's natural outer corner; the same vertex is the right corner of
+  // face k−1 and the left corner of face k. Image cols 0 and Nx−1 effectively
+  // contribute the same physical vertex, with relief clamped to 0 there.
+  // The relief surface tops out at z = H − chamferTop so the chamfer band
+  // (when enabled) sits between this row and z = H.
+  for (let j = 0; j < Ny; j++) {
+    const z = outerZTop - (j / (Ny - 1)) * outerZTop;
+    for (let i = 0; i < NxRing; i++) {
+      const k = Math.floor(i / (Nx - 1));
+      const col = i - k * (Nx - 1);
+      const s = (col / (Nx - 1)) * W - W / 2;
+      const relief = (col === 0) ? 0 : heightmap.data[col + j * Nx];
+      const r = outerApothem + relief;
+      const cT = cosT[k], sT = sinT[k];
+      const x = r * cT - s * sT;
+      const y = r * sT + s * cT;
+      const vi = (innerCount + i + j * NxRing) * 3;
+      positions[vi]     = x;
+      positions[vi + 1] = y;
+      positions[vi + 2] = z;
+    }
+  }
+
+  // Chamfer ring (only when chamferTop > 0): one vertex per outer ring index
+  // at z = H. Interior columns are inset by chamferTop in face k's normal
+  // direction. Shared polygon-corner vertices (col == 0) are inset along
+  // the outward corner bisector instead, so the chamfer wraps the corner
+  // symmetrically and stays watertight with both adjacent faces' chamfer
+  // bands meeting at the same vertex.
+  const chamferStart = innerCount + outerCount;
+  if (hasChamfer) {
+    for (let i = 0; i < NxRing; i++) {
+      const k = Math.floor(i / (Nx - 1));
+      const col = i - k * (Nx - 1);
+      const cTk = cosT[k], sTk = sinT[k];
+      let x, y;
+      if (col === 0) {
+        // Outward bisector of face k and face k−1 (the polygon corner direction).
+        const kPrev = (k + N - 1) % N;
+        let bx = cosT[k] + cosT[kPrev];
+        let by = sinT[k] + sinT[kPrev];
+        const blen = Math.sqrt(bx * bx + by * by) || 1;
+        bx /= blen; by /= blen;
+        // Outer-corner position (relief=0 at corner): face-k formula at s=−W/2.
+        const cx = outerApothem * cTk - (-W / 2) * sTk;
+        const cy = outerApothem * sTk + (-W / 2) * cTk;
+        x = cx - chamferTop * bx;
+        y = cy - chamferTop * by;
+      } else {
+        const s = (col / (Nx - 1)) * W - W / 2;
+        const relief = heightmap.data[col + 0 * Nx];
+        const r = outerApothem + relief - chamferTop;
+        x = r * cTk - s * sTk;
+        y = r * sTk + s * cTk;
+      }
+      const vi = (chamferStart + i) * 3;
+      positions[vi]     = x;
+      positions[vi + 1] = y;
+      positions[vi + 2] = H;
+    }
+  }
+
+  // Center vertices (closed-bottom only)
+  const centerBase = innerCount + outerCount + chamferCount;
+  const bottomCenter = closedBottom ? centerBase : -1;
+  const floorCenter  = closedBottom ? centerBase + 1 : -1;
   if (closedBottom) {
     positions[bottomCenter * 3]     = 0;
     positions[bottomCenter * 3 + 1] = 0;
@@ -335,38 +454,31 @@ export function buildPolygonPrismGeometry(heightmap, opts) {
     positions[floorCenter * 3 + 2]  = B;
   }
 
-  // Outer per-face grids
-  const outerStart = new Array(N);
-  for (let k = 0; k < N; k++) {
-    outerStart[k] = innerCount + k * Nx * Ny;
-    const cT = cosT[k], sT = sinT[k];
-    for (let j = 0; j < Ny; j++) {
-      const z = H - (j / (Ny - 1)) * H;
-      for (let i = 0; i < Nx; i++) {
-        const s = (i / (Nx - 1)) * W - W / 2;
-        const r = apothem + B + heightmap.data[i + j * Nx];
-        const x = r * cT + s * (-sT);
-        const y = r * sT + s * cT;
-        const vi = (outerStart[k] + i + j * Nx) * 3;
-        positions[vi]     = x;
-        positions[vi + 1] = y;
-        positions[vi + 2] = z;
-      }
-    }
-  }
-
-  const triCount = estimatePolygonPrismTriangleCount(N, Nx, Ny);
+  const triCount = estimatePolygonPrismTriangleCount(N, Nx, Ny, hasChamfer);
   const indices = new Uint32Array(triCount * 3);
   let p = 0;
 
-  const inner = (i, j) => (((i % NxInner) + NxInner) % NxInner) + j * NxInner;
-  const outerK = (k, i, j) => outerStart[k] + i + j * Nx;
-  // Inner ring index for face k, face-local column col.
-  const innerForFace = (k, col, j) => inner(k * (Nx - 1) + col, j);
+  const inner = (i, j) => (((i % NxRing) + NxRing) % NxRing) + j * NxRing;
+  const outer = (i, j) => innerCount + (((i % NxRing) + NxRing) % NxRing) + j * NxRing;
+  const chamfer = (i) => chamferStart + (((i % NxRing) + NxRing) % NxRing);
+  // Top ring used by the top edge wall (z=H): chamfer ring if present, else outer j=0.
+  const topRing = hasChamfer ? chamfer : (i) => outer(i, 0);
 
-  // Inner surface: closed ring with inward (toward-axis) normals
+  // Outer surface (outward normal). Shared closed ring like the cylinder.
   for (let j = 0; j < Ny - 1; j++) {
-    for (let i = 0; i < NxInner; i++) {
+    for (let i = 0; i < NxRing; i++) {
+      const a = outer(i, j);
+      const b = outer(i + 1, j);
+      const c = outer(i + 1, j + 1);
+      const d = outer(i, j + 1);
+      indices[p++] = a; indices[p++] = d; indices[p++] = c;
+      indices[p++] = a; indices[p++] = c; indices[p++] = b;
+    }
+  }
+
+  // Inner surface (inward radial normal toward the axis).
+  for (let j = 0; j < Ny - 1; j++) {
+    for (let i = 0; i < NxRing; i++) {
       const a = inner(i, j);
       const b = inner(i + 1, j);
       const c = inner(i + 1, j + 1);
@@ -376,103 +488,50 @@ export function buildPolygonPrismGeometry(heightmap, opts) {
     }
   }
 
-  // Outer surface per face: outward normal along face-k normal direction
-  for (let k = 0; k < N; k++) {
-    for (let j = 0; j < Ny - 1; j++) {
-      for (let i = 0; i < Nx - 1; i++) {
-        const a = outerK(k, i, j);
-        const b = outerK(k, i + 1, j);
-        const c = outerK(k, i + 1, j + 1);
-        const d = outerK(k, i, j + 1);
-        indices[p++] = a; indices[p++] = d; indices[p++] = c;
-        indices[p++] = a; indices[p++] = c; indices[p++] = b;
-      }
+  // Optional chamfer band: between outer ring j=0 (z=H−chamferTop) and the
+  // chamfer ring (z=H, perpendicular distance reduced by chamferTop). Normal
+  // tilts outward and upward.
+  if (hasChamfer) {
+    for (let i = 0; i < NxRing; i++) {
+      const a = outer(i, 0);
+      const b = outer(i + 1, 0);
+      const c = chamfer(i + 1);
+      const d = chamfer(i);
+      indices[p++] = a; indices[p++] = b; indices[p++] = c;
+      indices[p++] = a; indices[p++] = c; indices[p++] = d;
     }
   }
 
-  // Top edge wall per face (z=H, normal +Z)
-  for (let k = 0; k < N; k++) {
-    for (let i = 0; i < Nx - 1; i++) {
-      const o0 = outerK(k, i, 0);
-      const o1 = outerK(k, i + 1, 0);
-      const i0 = innerForFace(k, i, 0);
-      const i1 = innerForFace(k, i + 1, 0);
-      indices[p++] = o0; indices[p++] = o1; indices[p++] = i1;
-      indices[p++] = o0; indices[p++] = i1; indices[p++] = i0;
-    }
+  // Top edge wall (z=H annular ring, +Z normal). Connects whichever ring is
+  // currently the top of the outer mesh (chamfer ring if enabled, else
+  // outer j=0) to the inner top.
+  for (let i = 0; i < NxRing; i++) {
+    const o0 = topRing(i);
+    const o1 = topRing(i + 1);
+    const i0 = inner(i, 0);
+    const i1 = inner(i + 1, 0);
+    indices[p++] = o0; indices[p++] = o1; indices[p++] = i1;
+    indices[p++] = o0; indices[p++] = i1; indices[p++] = i0;
   }
 
   if (!closedBottom) {
-    // Bottom edge wall per face (annular cap at z=0, normal -Z)
-    for (let k = 0; k < N; k++) {
-      for (let i = 0; i < Nx - 1; i++) {
-        const o0 = outerK(k, i, Ny - 1);
-        const o1 = outerK(k, i + 1, Ny - 1);
-        const i0 = innerForFace(k, i, Ny - 1);
-        const i1 = innerForFace(k, i + 1, Ny - 1);
-        indices[p++] = o0; indices[p++] = i1; indices[p++] = o1;
-        indices[p++] = o0; indices[p++] = i0; indices[p++] = i1;
-      }
-    }
-  }
-
-  // Outer seam walls: between face k right outer edge and face (k+1) left
-  // outer edge. Even with zero relief these have width because the outer
-  // planes are offset by B from the inner planes.
-  for (let k = 0; k < N; k++) {
-    const kn = (k + 1) % N;
-    for (let j = 0; j < Ny - 1; j++) {
-      const a = outerK(k,  Nx - 1, j);     // top, face-k side
-      const b = outerK(kn, 0,      j);     // top, face-(k+1) side
-      const c = outerK(kn, 0,      j + 1); // bottom, face-(k+1) side
-      const d = outerK(k,  Nx - 1, j + 1); // bottom, face-k side
-      indices[p++] = a; indices[p++] = d; indices[p++] = c;
-      indices[p++] = a; indices[p++] = c; indices[p++] = b;
-    }
-  }
-
-  // Top corner triangles: close the gap above each seam wall (normal +Z)
-  for (let k = 0; k < N; k++) {
-    const kn = (k + 1) % N;
-    const tInner = innerForFace(kn, 0, 0); // shared inner top corner
-    const tkR = outerK(k,  Nx - 1, 0);
-    const tknL = outerK(kn, 0,     0);
-    indices[p++] = tInner; indices[p++] = tkR; indices[p++] = tknL;
-  }
-
-  if (!closedBottom) {
-    // Bottom corner triangles (normal -Z) close the gap below each seam wall
-    for (let k = 0; k < N; k++) {
-      const kn = (k + 1) % N;
-      const bInner = innerForFace(kn, 0, Ny - 1);
-      const bkR = outerK(k,  Nx - 1, Ny - 1);
-      const bknL = outerK(kn, 0,     Ny - 1);
-      indices[p++] = bInner; indices[p++] = bknL; indices[p++] = bkR;
+    // Bottom edge wall (z=0 annular ring, −Z normal).
+    for (let i = 0; i < NxRing; i++) {
+      const o0 = outer(i, Ny - 1);
+      const o1 = outer(i + 1, Ny - 1);
+      const i0 = inner(i, Ny - 1);
+      const i1 = inner(i + 1, Ny - 1);
+      indices[p++] = o0; indices[p++] = i1; indices[p++] = o1;
+      indices[p++] = o0; indices[p++] = i0; indices[p++] = i1;
     }
   } else {
-    // Closed bottom: replace the annular bottom + bottom corners with two
-    // solid faces (a flat bottom at z=0 spanning the full outer perimeter
-    // and an inner floor disc at z=B sealing the inner void).
-
-    // Bottom face at z=0 (normal -Z): triangle fan from bottomCenter to the
-    // outer perimeter walking each face's bottom row plus the seam edges
-    // between adjacent faces.
-    for (let k = 0; k < N; k++) {
-      for (let i = 0; i < Nx - 1; i++) {
-        const a = outerK(k, i,     Ny - 1);
-        const b = outerK(k, i + 1, Ny - 1);
-        // (center, b, a) ⇒ −Z normal
-        indices[p++] = bottomCenter; indices[p++] = b; indices[p++] = a;
-      }
-      const kn = (k + 1) % N;
-      const a = outerK(k,  Nx - 1, Ny - 1);
-      const b = outerK(kn, 0,      Ny - 1);
+    // Closed mode: solid bottom face + inner floor disc at z=B.
+    for (let i = 0; i < NxRing; i++) {
+      const a = outer(i,     Ny - 1);
+      const b = outer(i + 1, Ny - 1);
       indices[p++] = bottomCenter; indices[p++] = b; indices[p++] = a;
     }
-
-    // Inner floor disc at z=B (normal +Z): triangle fan from floorCenter to
-    // the inner ring at j=Ny-1 (which now sits at z=B).
-    for (let i = 0; i < NxInner; i++) {
+    for (let i = 0; i < NxRing; i++) {
       const i0 = inner(i,     Ny - 1);
       const i1 = inner(i + 1, Ny - 1);
       indices[p++] = floorCenter; indices[p++] = i0; indices[p++] = i1;
@@ -488,6 +547,7 @@ export function buildPolygonPrismGeometry(heightmap, opts) {
     Ny,
     sides: N,
     innerCount,
-    outerStart
+    NxRing,
+    chamferCount
   };
 }

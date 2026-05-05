@@ -97,6 +97,12 @@ The `dist/` directory after `build` contains a fully self-contained app (no CDN,
   the prism prints as a sealed cup with an open top — good for pen holders,
   planters, or display boxes that should hold contents. Disable to get the
   cylinder-style open tube (both ends open through the central axis).
+- *Side width* W is the **outer** side length of the polygon. Adjacent faces
+  meet at sharp polygon corners; the relief is automatically faded to zero
+  at each face's left and right edge column so the corner sits exactly on
+  the geometric polygon corner. If you want a wider clean transition
+  between adjacent faces, add some *Margin X* — that frame extends the
+  flat region inward and gives the relief a clean border.
 - Print standing up. Useful for backlit lanterns or display boxes where the
   same artwork should be visible from all angles.
 
