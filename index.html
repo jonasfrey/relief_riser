@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+    <title>Relief Riser — Image → 3D Relief STL</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <h1>Relief Riser</h1>
+      <span class="subtitle">Image → printable 3D relief plate (STL)</span>
+    </header>
+
+    <main class="layout">
+      <!-- Column 1: image input + 2D editor -->
+      <section class="col col-image">
+        <div class="panel">
+          <h2>1. Source image</h2>
+          <div id="dropZone" class="drop-zone">
+            <p>Drop an image or .stl here, or</p>
+            <label class="btn">
+              Choose file…
+              <input type="file" id="fileInput" accept="image/png,image/jpeg,image/webp,image/bmp,.stl,model/stl" hidden />
+            </label>
+            <p class="hint">PNG · JPG · WebP · BMP · STL — processed locally, never uploaded</p>
+          </div>
+
+          <div class="control hidden" id="stlControls">
+            <label for="stlSide">STL view side</label>
+            <select id="stlSide">
+              <option value="front" selected>Front (+Y)</option>
+              <option value="back">Back (−Y)</option>
+              <option value="right">Right (+X)</option>
+              <option value="left">Left (−X)</option>
+              <option value="top">Top (+Z)</option>
+              <option value="bottom">Bottom (−Z)</option>
+            </select>
+          </div>
+          <div class="control inline">
+            <label>
+              <input type="checkbox" id="autoCrop" checked />
+              Auto-crop to content
+            </label>
+          </div>
+          <div class="preview-pair">
+            <div>
+              <h3>Source <span id="cropBadge" class="badge hidden">cropped</span></h3>
+              <canvas id="originalCanvas" class="img-preview"></canvas>
+            </div>
+            <div>
+              <h3>Processed (heightmap)</h3>
+              <canvas id="processedCanvas" class="img-preview"></canvas>
+            </div>
+          </div>
+        </div>
+
+        <details class="panel" open>
+          <summary><h2>2. Image editor</h2></summary>
+
+          <div class="control">
+            <label for="brightness">Brightness</label>
+            <input type="range" id="brightness" min="-100" max="100" step="1" value="0" />
+            <input type="number" id="brightnessNum" min="-100" max="100" step="1" value="0" />
+          </div>
+
+          <div class="control">
+            <label for="contrast">Contrast</label>
+            <input type="range" id="contrast" min="-100" max="100" step="1" value="0" />
+            <input type="number" id="contrastNum" min="-100" max="100" step="1" value="0" />
+          </div>
+
+          <div class="control">
+            <label for="blur">Gaussian blur (px)</label>
+            <input type="range" id="blur" min="0" max="10" step="0.5" value="0" />
+            <input type="number" id="blurNum" min="0" max="10" step="0.5" value="0" />
+          </div>
+
+          <div class="control">
+            <label for="colorCount">Color count</label>
+            <select id="colorCount">
+              <option value="1">1 — smooth grayscale (lithophane)</option>
+              <option value="2" selected>2 — black &amp; white</option>
+              <option value="3">3 colors</option>
+              <option value="4">4 colors</option>
+              <option value="5">5 colors</option>
+              <option value="6">6 colors</option>
+              <option value="7">7 colors</option>
+              <option value="8">8 colors</option>
+            </select>
+          </div>
+
+          <div class="control" id="thresholdControl">
+            <label for="threshold">Threshold (0–255) — boundary between the 2 colors</label>
+            <input type="range" id="threshold" min="0" max="255" step="1" value="128" />
+            <input type="number" id="thresholdNum" min="0" max="255" step="1" value="128" />
+          </div>
+
+          <div class="control inline">
+            <label><input type="checkbox" id="invert" /> Invert grayscale</label>
+          </div>
+
+          <div class="control">
+            <label for="resolutionMode">Resolution mode</label>
+            <select id="resolutionMode">
+              <option value="density" selected>Density (vertices per mm)</option>
+              <option value="maxDim">Max grid dimension (px)</option>
+            </select>
+          </div>
+
+          <div class="control" id="densityControl">
+            <label for="density">Density (verts/mm)</label>
+            <input type="range" id="density" min="0.5" max="20" step="0.1" value="5" />
+            <input type="number" id="densityNum" min="0.5" max="20" step="0.1" value="5" />
+          </div>
+
+          <div class="control" id="maxDimControl">
+            <label for="maxDim">Max grid dimension (px)</label>
+            <input type="range" id="maxDim" min="16" max="1024" step="1" value="200" />
+            <input type="number" id="maxDimNum" min="16" max="1024" step="1" value="200" />
+          </div>
+
+          <p class="hint">Higher resolution = more detail, larger STL, slower preview.</p>
+
+          <h3 style="margin-top:0.8rem;">Tiling &amp; margin</h3>
+
+          <div class="control">
+            <label for="tileX">Repeat X</label>
+            <input type="range" id="tileX" min="1" max="10" step="1" value="1" />
+            <input type="number" id="tileXNum" min="1" max="10" step="1" value="1" />
+          </div>
+
+          <div class="control">
+            <label for="tileY">Repeat Y</label>
+            <input type="range" id="tileY" min="1" max="10" step="1" value="1" />
+            <input type="number" id="tileYNum" min="1" max="10" step="1" value="1" />
+          </div>
+
+          <div class="control">
+            <label for="marginX">Margin X (mm)</label>
+            <input type="range" id="marginX" min="0" max="50" step="0.1" value="2" />
+            <input type="number" id="marginXNum" min="0" max="50" step="0.1" value="2" />
+          </div>
+
+          <div class="control">
+            <label for="marginY">Margin Y (mm)</label>
+            <input type="range" id="marginY" min="0" max="50" step="0.1" value="2" />
+            <input type="number" id="marginYNum" min="0" max="50" step="0.1" value="2" />
+          </div>
+        </details>
+      </section>
+
+      <!-- Column 2: 3D viewport -->
+      <section class="col col-viewport">
+        <div class="viewport-wrap">
+          <div id="viewport"></div>
+          <div class="viewport-overlay">
+            <div id="meshStats">No mesh</div>
+            <div id="warningBox" class="warning hidden"></div>
+          </div>
+          <div id="regenButtonWrap" class="regen-wrap hidden">
+            <button id="regenBtn" class="btn primary">Regenerate mesh</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Column 3: 3D parameters + export -->
+      <section class="col col-params">
+        <div class="panel">
+          <h2>3. Shape parameters (mm)</h2>
+
+          <div class="control">
+            <label for="shape">Shape</label>
+            <select id="shape">
+              <option value="rectangular" selected>Rectangular plate</option>
+              <option value="cylindrical">Cylindrical (image wraps around)</option>
+              <option value="polygon">Polygon prism (same image on each side)</option>
+            </select>
+          </div>
+
+          <div class="control hidden" id="sidesControl">
+            <label for="sides">Number of sides</label>
+            <input type="range" id="sides" min="3" max="20" step="1" value="4" />
+            <input type="number" id="sidesNum" min="3" max="20" step="1" value="4" />
+          </div>
+
+          <div class="control inline hidden" id="closedBottomControl">
+            <label>
+              <input type="checkbox" id="closedBottom" checked />
+              Closed bottom (solid floor of thickness = base)
+            </label>
+          </div>
+
+          <div class="control">
+            <label for="plateW" id="plateWLabel">Width W</label>
+            <input type="range" id="plateW" min="5" max="300" step="0.5" value="18" />
+            <input type="number" id="plateWNum" min="5" max="300" step="0.5" value="18" />
+          </div>
+
+          <div class="control">
+            <label for="plateH">Height H</label>
+            <input type="range" id="plateH" min="5" max="300" step="0.5" value="18" />
+            <input type="number" id="plateHNum" min="5" max="300" step="0.5" value="18" />
+          </div>
+
+          <div class="control">
+            <label for="baseThickness">Base thickness</label>
+            <input type="range" id="baseThickness" min="0.4" max="10" step="0.1" value="1.5" />
+            <input type="number" id="baseThicknessNum" min="0.4" max="10" step="0.1" value="1.5" />
+          </div>
+
+          <div id="layerHeights" class="layer-heights"></div>
+          <button id="autoDistribute" class="btn block" type="button">Auto-distribute layers 0…max evenly</button>
+
+          <div class="control" style="margin-top: 0.6rem;">
+            <label>Mapping direction</label>
+            <select id="mapDir">
+              <option value="white">White = high (default)</option>
+              <option value="black">Black = high</option>
+            </select>
+          </div>
+
+          <div class="control">
+            <label>Aspect handling</label>
+            <select id="fitMode">
+              <option value="fit">Fit (preserve image aspect)</option>
+              <option value="stretch">Stretch to W × H</option>
+            </select>
+          </div>
+        </div>
+
+        <details class="panel" open>
+          <summary><h2>4. Display</h2></summary>
+          <div class="control inline"><label><input type="checkbox" id="showSolid" checked /> Solid surface</label></div>
+          <div class="control inline"><label><input type="checkbox" id="showWireframe" /> Wireframe (mesh edges)</label></div>
+          <div class="control inline"><label><input type="checkbox" id="showVertices" /> Vertices (points)</label></div>
+          <p class="hint">Wireframe + vertices are rendered on top of the solid mesh. Disable Solid to see only the wireframe / points.</p>
+        </details>
+
+        <div class="panel">
+          <h2>5. Export</h2>
+          <div class="control inline">
+            <label><input type="checkbox" id="asciiSTL" /> ASCII STL (larger, human-readable)</label>
+          </div>
+          <button id="downloadSTL" class="btn primary block" disabled>Download STL</button>
+          <button id="downloadPNG" class="btn block" disabled>Download processed PNG</button>
+          <p class="hint" id="exportHint"></p>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
