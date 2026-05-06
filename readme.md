@@ -39,7 +39,7 @@ The `dist/` directory after `build` contains a fully self-contained app (no CDN,
 | Resolution mode    | *Density (verts/mm)* — keeps detail constant across plate sizes (default = 5). *Max grid dim (px)* — caps total mesh size. |
 | Display            | Toggle Solid / Wireframe / Vertices independently. Wireframe + vertices render on top of the solid; disable Solid to inspect just the mesh. |
 | Auto-crop          | Trims the source image to its content bounding box (alpha if present, else colour-similarity). |
-| Shape              | Rectangular plate · Cylindrical (open tube) · Polygon prism (hollow N-sided box, same image on each face). |
+| Shape              | Rectangular plate · Cylindrical (open tube) · Polygon prism (hollow N-sided box, same image on each face) · Custom profile (revolved DXF — closed 2D outline rotated around Z, relief offsets the outer band). |
 | Number of sides    | Polygon mode only: 3–20 (default 4 → cube).                                                    |
 | Closed bottom      | Polygon mode only, default ON: adds a solid floor of thickness = base thickness, so the prism prints as a sealed cup instead of an open tube. |
 | Width / Diameter / Side | Rectangular width, cylinder diameter, or polygon side length (mm). Label tracks the shape. |

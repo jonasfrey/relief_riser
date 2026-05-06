@@ -30,12 +30,20 @@ export function computeTargetDimensions(plateW, plateH, maxDim) {
 //   tileX, tileY       — repeat counts (default 1; >1 tiles the source inside the drawing area)
 //   marginPxX, marginPxY — flat-relief border width in pixels on each side
 //   fillColor          — CSS color used for margin / out-of-image-bounds (default '#ffffff')
+//   perTileFit         — when true, each tile is fit independently inside
+//                        its own (innerW/tileX × innerH/tileY) box (preserves
+//                        source aspect within each tile, no global letterbox).
+//                        When false (default), the entire tiled source is fit
+//                        as a single image preserving combined aspect — the
+//                        right semantic for flat plates, but it letterboxes
+//                        when the canvas aspect doesn't match source × tile.
 export function rasterize(sourceCanvas, targetW, targetH, fitMode, opts = {}) {
   const tileX = Math.max(1, opts.tileX | 0 || 1);
   const tileY = Math.max(1, opts.tileY | 0 || 1);
   const marginPxX = Math.max(0, Math.round(opts.marginPxX || 0));
   const marginPxY = Math.max(0, Math.round(opts.marginPxY || 0));
   const fillColor = opts.fillColor || '#ffffff';
+  const perTileFit = !!opts.perTileFit;
 
   const canvas = document.createElement('canvas');
   canvas.width = targetW;
@@ -49,7 +57,40 @@ export function rasterize(sourceCanvas, targetW, targetH, fitMode, opts = {}) {
   const innerH = targetH - 2 * marginPxY;
   if (innerW <= 0 || innerH <= 0) return canvas;
 
-  // Effective source dimensions after tiling
+  if (perTileFit) {
+    // Per-tile fit: each of tileX × tileY tiles owns its own box of size
+    // (innerW/tileX) × (innerH/tileY). The source image is fit into that
+    // box (preserving its aspect) or stretched to it. Used for closed
+    // revolved surfaces where tileX must literally wrap N times around.
+    const boxW = innerW / tileX;
+    const boxH = innerH / tileY;
+    const srcAspect = sourceCanvas.width / sourceCanvas.height;
+    let drawW, drawH;
+    if (fitMode === 'fit') {
+      const boxAspect = boxW / boxH;
+      if (srcAspect > boxAspect) { drawW = boxW; drawH = boxW / srcAspect; }
+      else                       { drawH = boxH; drawW = boxH * srcAspect; }
+    } else {
+      drawW = boxW; drawH = boxH;
+    }
+    const insetX = (boxW - drawW) / 2;
+    const insetY = (boxH - drawH) / 2;
+    for (let j = 0; j < tileY; j++) {
+      for (let i = 0; i < tileX; i++) {
+        ctx.drawImage(
+          sourceCanvas,
+          marginPxX + i * boxW + insetX,
+          marginPxY + j * boxH + insetY,
+          drawW, drawH
+        );
+      }
+    }
+    return canvas;
+  }
+
+  // Combined-aspect fit (legacy / flat-plate path): treat the tile array as
+  // a single image of size sourceW·tileX × sourceH·tileY and fit/stretch
+  // that into the canvas.
   const tiledW = sourceCanvas.width * tileX;
   const tiledH = sourceCanvas.height * tileY;
 
@@ -75,8 +116,6 @@ export function rasterize(sourceCanvas, targetW, targetH, fitMode, opts = {}) {
     dy = marginPxY;
   }
 
-  // Tile by drawing the source tileX × tileY times, each tile sized to fill
-  // its share of the drawing area.
   const tileW = dw / tileX;
   const tileH = dh / tileY;
   for (let j = 0; j < tileY; j++) {

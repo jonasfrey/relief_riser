@@ -16,10 +16,19 @@ import {
   buildReliefGeometry,
   buildCylindricalGeometry,
   buildPolygonPrismGeometry,
+  buildCustomProfileGeometry,
   estimateTriangleCount,
   estimateCylindricalTriangleCount,
-  estimatePolygonPrismTriangleCount
+  estimatePolygonPrismTriangleCount,
+  estimateCustomProfileTriangleCount
 } from './geometry.js';
+import {
+  loadDxfFromFile,
+  loadDxfFromUrl,
+  findOuterBand,
+  resampleSlice,
+  spliceSlice
+} from './dxfReader.js';
 import {
   exportSTLBinary,
   exportSTLAscii,
@@ -69,8 +78,17 @@ const els = {
   closedBottomControl: $('closedBottomControl'),
   chamferTop: $('chamferTop'),       chamferTopNum: $('chamferTopNum'),
   chamferTopControl: $('chamferTopControl'),
+  customProfileControls: $('customProfileControls'),
+  profileFile: $('profileFile'),
+  profileResetBtn: $('profileResetBtn'),
+  profileStatus: $('profileStatus'),
+  radiusFactor: $('radiusFactor'),   radiusFactorNum: $('radiusFactorNum'),
+  heightFactor: $('heightFactor'),   heightFactorNum: $('heightFactorNum'),
+  outerBandFrac: $('outerBandFrac'), outerBandFracNum: $('outerBandFracNum'),
   plateW: $('plateW'),               plateWNum: $('plateWNum'),
   plateWLabel: $('plateWLabel'),
+  plateWControl: null,               plateHControl: null,
+  baseThicknessControl: null,
   plateH: $('plateH'),               plateHNum: $('plateHNum'),
   baseThickness: $('baseThickness'), baseThicknessNum: $('baseThicknessNum'),
   layerHeights: $('layerHeights'),
@@ -78,6 +96,7 @@ const els = {
   mapDir: $('mapDir'),
   fitMode: $('fitMode'),
   autoCrop: $('autoCrop'),
+  rotation: $('rotation'),
   cropBadge: $('cropBadge'),
 
   asciiSTL: $('asciiSTL'),
@@ -111,7 +130,10 @@ const sliderPairs = [
   ['stlRenderSize', 'stlRenderSizeNum'],
   ['plateW', 'plateWNum'],
   ['plateH', 'plateHNum'],
-  ['baseThickness', 'baseThicknessNum']
+  ['baseThickness', 'baseThicknessNum'],
+  ['radiusFactor', 'radiusFactorNum'],
+  ['heightFactor', 'heightFactorNum'],
+  ['outerBandFrac', 'outerBandFracNum']
 ];
 
 function linkPair(rangeEl, numEl) {
@@ -151,11 +173,59 @@ sliderPairs.forEach(([r, n]) => linkPair(els[r], els[n]));
 els.shape.addEventListener('change', () => {
   state.shape = els.shape.value;
   updateShapeLabels();
+  if (state.shape === 'customProfile' && !state.profilePoints) {
+    loadDefaultProfile();   // fire-and-forget; pipeline re-runs when it lands
+  }
   onParamChange();
 });
 
+els.profileFile.addEventListener('change', async (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  try {
+    const { points } = await loadDxfFromFile(file);
+    state.profilePoints = points;
+    state.profileSource = 'user';
+    state.profileFilename = file.name;
+    setProfileStatus(`Loaded ${file.name} — ${points.length} points`);
+    triggerProcessing(true);
+  } catch (err) {
+    setProfileStatus(`Error: ${err.message}`, true);
+  }
+});
+
+els.profileResetBtn.addEventListener('click', () => loadDefaultProfile());
+
+async function loadDefaultProfile() {
+  setProfileStatus('Loading default profile…');
+  try {
+    const { points } = await loadDxfFromUrl('default_ring_profile.dxf');
+    state.profilePoints = points;
+    state.profileSource = 'default';
+    state.profileFilename = 'default_ring_profile.dxf';
+    setProfileStatus(`Default profile — ${points.length} points`);
+    triggerProcessing(true);
+  } catch (err) {
+    setProfileStatus(`Could not load default profile: ${err.message}`, true);
+  }
+}
+
+function setProfileStatus(msg, isError) {
+  els.profileStatus.textContent = msg;
+  els.profileStatus.style.color = isError ? '#c33' : '';
+}
+
 els.autoCrop.addEventListener('change', () => {
   state.autoCrop = els.autoCrop.checked;
+  applyAutoCrop();
+  autoFitHeightToImage();
+  persist();
+  triggerProcessing(true);
+});
+
+els.rotation.addEventListener('change', () => {
+  state.rotation = parseInt(els.rotation.value, 10) || 0;
+  applyRotation();
   applyAutoCrop();
   autoFitHeightToImage();
   persist();
@@ -196,13 +266,17 @@ const STORAGE_KEY = 'relief-riser-params-v2';
 const DEFAULT_MAX_HEIGHT = 0.4;
 
 const state = {
-  rawSourceCanvas: null,  // image as loaded (or rendered STL depth)
+  // Pristine canvas as loaded from disk / STL projection — never rotated.
+  // We re-derive `rawSourceCanvas` from this whenever rotation changes.
+  originalRawCanvas: null,
+  rawSourceCanvas: null,  // (originalRawCanvas) rotated by `state.rotation`
   sourceCanvas: null,     // possibly cropped, used for processing
   sourceFilename: null,
   inputType: 'image',     // 'image' or 'stl'
   stlData: null,          // { positions, triCount } when inputType === 'stl'
   stlSide: 'front',
   lastStlRenderSize: 0,   // tracks the size we last projected at
+  rotation: 0,            // 0 / 90 / 180 / 270, applied to originalRawCanvas
   processed: null,        // { displayImageData, levelMap, width, height, colorCount }
   heightmapMm: null,      // Float32Array of mm above the base
   geometry: null,
@@ -212,7 +286,13 @@ const state = {
   polygonSides: 4,
   autoCrop: true,
   resolutionMode: 'density',  // 'density' (verts/mm) or 'maxDim' (px)
-  display: { solid: true, wireframe: false, vertices: false }
+  display: { solid: true, wireframe: false, vertices: false },
+  // Custom profile mode — populated when a DXF is loaded (or default fetched).
+  // profilePoints: closed polyline in DXF mm, no duplicate end vertex.
+  // profileSource: 'default' | 'user' | null
+  profilePoints: null,
+  profileSource: null,
+  profileFilename: null
 };
 
 const viewer = new Viewer(els.viewport);
@@ -317,6 +397,7 @@ function updateThresholdVisibility() {
 function updateShapeLabels() {
   const isPoly = state.shape === 'polygon';
   const isCyl  = state.shape === 'cylindrical';
+  const isCustom = state.shape === 'customProfile';
   if (isCyl) {
     els.plateWLabel.textContent = 'Image tile width (mm)';
   } else if (isPoly) {
@@ -325,15 +406,51 @@ function updateShapeLabels() {
     els.plateWLabel.textContent = 'Width W';
   }
   els.sidesControl.classList.toggle('hidden', !isPoly);
-  // Closed bottom is available for both cylinder and polygon prism modes.
   els.closedBottomControl.classList.toggle('hidden', !(isPoly || isCyl));
   els.chamferTopControl.classList.toggle('hidden', !isPoly);
+  els.customProfileControls.classList.toggle('hidden', !isCustom);
+  // In custom profile mode the geometry is defined by the DXF + factors,
+  // so the plain plate W/H/baseThickness sliders are irrelevant.
+  const plateCtl = els.plateW.closest('.control');
+  const plateHCtl = els.plateH.closest('.control');
+  const baseCtl = els.baseThickness.closest('.control');
+  if (plateCtl)  plateCtl.classList.toggle('hidden', isCustom);
+  if (plateHCtl) plateHCtl.classList.toggle('hidden', isCustom);
+  if (baseCtl)   baseCtl.classList.toggle('hidden', isCustom);
 }
 
 function updateResolutionVisibility() {
   const dens = state.resolutionMode === 'density';
   els.densityControl.classList.toggle('hidden', !dens);
   els.maxDimControl.classList.toggle('hidden', dens);
+}
+
+// Rotate a canvas by 0/90/180/270° (CW). Returns a new canvas; passes the
+// original through unchanged when rotation is 0 to avoid an extra blit.
+function rotateCanvas(src, deg) {
+  deg = ((deg % 360) + 360) % 360;
+  if (deg === 0) return src;
+  const w = src.width, h = src.height;
+  const out = document.createElement('canvas');
+  if (deg === 90 || deg === 270) {
+    out.width = h;
+    out.height = w;
+  } else {
+    out.width = w;
+    out.height = h;
+  }
+  const ctx = out.getContext('2d');
+  ctx.translate(out.width / 2, out.height / 2);
+  ctx.rotate(deg * Math.PI / 180);
+  ctx.drawImage(src, -w / 2, -h / 2);
+  return out;
+}
+
+// Rebuild rawSourceCanvas from the original by applying the current rotation.
+// Called on load and when the rotation control changes.
+function applyRotation() {
+  if (!state.originalRawCanvas) return;
+  state.rawSourceCanvas = rotateCanvas(state.originalRawCanvas, state.rotation);
 }
 
 function applyAutoCrop() {
@@ -411,7 +528,11 @@ function readParamsFromUI() {
     sides: parseInt(els.sides.value, 10) || 4,
     closedBottom: els.closedBottom.checked,
     chamferTop: parseFloat(els.chamferTop.value) || 0,
+    radiusFactor: parseFloat(els.radiusFactor.value) || 1,
+    heightFactor: parseFloat(els.heightFactor.value) || 1,
+    outerBandFrac: parseFloat(els.outerBandFrac.value) || 50,
     autoCrop: state.autoCrop,
+    rotation: state.rotation,
     stlSide: state.stlSide,
     stlRenderSize: parseInt(els.stlRenderSize.value, 10) || STL_RENDER_MAX_DIM_DEFAULT,
     display: { ...state.display },
@@ -435,6 +556,9 @@ function writeParamsToUI(p) {
   setNum('density', 'densityNum', p.density);
   setNum('sides', 'sidesNum', p.sides);
   setNum('chamferTop', 'chamferTopNum', p.chamferTop);
+  setNum('radiusFactor', 'radiusFactorNum', p.radiusFactor);
+  setNum('heightFactor', 'heightFactorNum', p.heightFactor);
+  setNum('outerBandFrac', 'outerBandFracNum', p.outerBandFrac);
   setNum('stlRenderSize', 'stlRenderSizeNum', p.stlRenderSize);
   setNum('tileX', 'tileXNum', p.tileX);
   setNum('tileY', 'tileYNum', p.tileY);
@@ -455,7 +579,7 @@ function writeParamsToUI(p) {
     state.layerHeights = p.layerHeights.slice();
     while (state.layerHeights.length < state.colorCount) state.layerHeights.push(0);
   }
-  if (p.shape === 'rectangular' || p.shape === 'cylindrical' || p.shape === 'polygon') {
+  if (p.shape === 'rectangular' || p.shape === 'cylindrical' || p.shape === 'polygon' || p.shape === 'customProfile') {
     state.shape = p.shape;
     els.shape.value = p.shape;
   }
@@ -463,6 +587,11 @@ function writeParamsToUI(p) {
   if (p.autoCrop != null) {
     state.autoCrop = !!p.autoCrop;
     els.autoCrop.checked = state.autoCrop;
+  }
+  if (p.rotation != null) {
+    const r = ((parseInt(p.rotation, 10) || 0) % 360 + 360) % 360;
+    state.rotation = (r === 0 || r === 90 || r === 180 || r === 270) ? r : 0;
+    els.rotation.value = String(state.rotation);
   }
   if (typeof p.stlSide === 'string' && p.stlSide in { front:1, back:1, left:1, right:1, top:1, bottom:1 }) {
     state.stlSide = p.stlSide;
@@ -502,6 +631,10 @@ updateThresholdVisibility();
 updateShapeLabels();
 updateResolutionVisibility();
 els.asciiSTL.addEventListener('change', persist);
+
+if (state.shape === 'customProfile') {
+  loadDefaultProfile();
+}
 
 // ---------- file input ----------
 
@@ -553,16 +686,17 @@ async function handleFile(file) {
       state.stlData = mesh;
       state.inputType = 'stl';   // kept for backward-compat — same code path
       const size = currentStlRenderSize();
-      state.rawSourceCanvas = projectSTLToCanvas(mesh, state.stlSide || 'front', size);
+      state.originalRawCanvas = projectSTLToCanvas(mesh, state.stlSide || 'front', size);
       state.lastStlRenderSize = size;
     } else {
       state.stlData = null;
       state.inputType = 'image';
-      state.rawSourceCanvas = await loadImageFromFile(file);
+      state.originalRawCanvas = await loadImageFromFile(file);
       state.lastStlRenderSize = 0;
     }
     state.sourceFilename = file.name.replace(/\.[^.]+$/, '') || 'input';
     updateStlControlsVisibility();
+    applyRotation();
     applyAutoCrop();
     autoFitHeightToImage();
     setExportEnabled(false);
@@ -576,8 +710,9 @@ function rerenderStlDepth() {
   if (state.inputType !== 'stl' || !state.stlData) return;
   try {
     const size = currentStlRenderSize();
-    state.rawSourceCanvas = projectSTLToCanvas(state.stlData, state.stlSide, size);
+    state.originalRawCanvas = projectSTLToCanvas(state.stlData, state.stlSide, size);
     state.lastStlRenderSize = size;
+    applyRotation();
     applyAutoCrop();
     autoFitHeightToImage();
     triggerProcessing(true);
@@ -594,8 +729,9 @@ function maybeReprojectStl() {
   const size = currentStlRenderSize();
   if (size === state.lastStlRenderSize) return false;
   try {
-    state.rawSourceCanvas = projectSTLToCanvas(state.stlData, state.stlSide, size);
+    state.originalRawCanvas = projectSTLToCanvas(state.stlData, state.stlSide, size);
     state.lastStlRenderSize = size;
+    applyRotation();
     applyAutoCrop();
     autoFitHeightToImage();
     return true;
@@ -630,8 +766,26 @@ function getTargetDims(params) {
   // Cylindrical mode: W is the per-tile arc width in mm. The unrolled
   // rectangle is (W × tileX) wide so all tileX repetitions cover the full
   // circumference. Polygon mode: W is the per-face side width.
-  const w = params.shape === 'cylindrical' ? params.plateW * params.tileX : params.plateW;
-  const h = params.plateH;
+  // Custom-profile mode: heightmap width = full circumference at the outer
+  // band's max radius (after factors); heightmap height = outer-band arc
+  // length. Both already include their tile multipliers, like cylinder mode.
+  let w, h;
+  if (params.shape === 'customProfile') {
+    const dims = customProfileDims(params);
+    if (!dims) return { targetW: 2, targetH: 2 };
+    // Closed surface: a single revolution covers the whole circumference, so
+    // baseW = circumference (NOT × tileX). The rasterizer's perTileFit path
+    // then gets a per-tile pixel box whose aspect matches the physical tile
+    // aspect (circumference/tileX) / bandLength.
+    w = dims.circumference;
+    h = dims.bandLength;
+  } else if (params.shape === 'cylindrical') {
+    w = params.plateW * params.tileX;
+    h = params.plateH;
+  } else {
+    w = params.plateW;
+    h = params.plateH;
+  }
   if (params.resolutionMode === 'density') {
     const d = params.density;
     return {
@@ -642,9 +796,45 @@ function getTargetDims(params) {
   return computeTargetDimensions(w, h, params.maxDim);
 }
 
-function estimateTrisForShape(targetW, targetH, shape, sides, hasChamfer) {
+// For custom-profile mode: compute the full circumference at the outermost
+// radius (post-scaling) and the arc length of the outer band of the
+// (scaled) profile. Returns null if no profile is loaded yet.
+function customProfileDims(params) {
+  if (!state.profilePoints || state.profilePoints.length < 3) return null;
+  const rf = params.radiusFactor || 1;
+  const hf = params.heightFactor || 1;
+  const scaled = state.profilePoints.map(([x, y]) => [x * rf, y * hf]);
+  let maxX = -Infinity, minX = Infinity;
+  for (const p of scaled) {
+    if (p[0] > maxX) maxX = p[0];
+    if (p[0] < minX) minX = p[0];
+  }
+  const eps = (maxX - minX) * Math.max(0.01, Math.min(1, (params.outerBandFrac || 50) / 100));
+  const band = findOuterBand(scaled, eps);
+  if (band.length < 2) return null;
+  // Arc length of the outer band slice
+  let bandLength = 0;
+  for (let k = 0; k < band.length - 1; k++) {
+    const a = scaled[(band.startIdx + k) % scaled.length];
+    const b = scaled[(band.startIdx + k + 1) % scaled.length];
+    bandLength += Math.hypot(b[0] - a[0], b[1] - a[1]);
+  }
+  const circumference = 2 * Math.PI * maxX;
+  return { circumference, bandLength, scaled, band, maxR: maxX };
+}
+
+function estimateTrisForShape(targetW, targetH, shape, sides, hasChamfer, profileLen) {
   if (shape === 'cylindrical') return estimateCylindricalTriangleCount(targetW, targetH);
   if (shape === 'polygon') return estimatePolygonPrismTriangleCount(sides, targetW, targetH, hasChamfer);
+  if (shape === 'customProfile') {
+    // After splicing the outer band (length Ny) into the profile (originally
+    // Np_orig points), the new profile has Np_orig − band.length + Ny points.
+    // We don't know band.length here without recomputing; use a conservative
+    // estimate of profileLen (the original) + Ny as an upper bound that still
+    // grows linearly with Ny.
+    const np = (profileLen || 32) + targetH;
+    return estimateCustomProfileTriangleCount(targetW, np);
+  }
   return estimateTriangleCount(targetW, targetH);
 }
 
@@ -657,7 +847,8 @@ function triggerProcessing(immediate) {
 
   const params = readParamsFromUI();
   const { targetW, targetH } = getTargetDims(params);
-  const tris = estimateTrisForShape(targetW, targetH, params.shape, params.sides, params.chamferTop > 0);
+  const profileLen = state.profilePoints ? state.profilePoints.length : 0;
+  const tris = estimateTrisForShape(targetW, targetH, params.shape, params.sides, params.chamferTop > 0, profileLen);
 
   if (tris > TRI_HARD_LIMIT) {
     showWarning(
@@ -694,9 +885,29 @@ function regeneratePipeline() {
 
   // Convert margin mm → pixels using actual mm-to-pixel ratio for each axis.
   // For cylinder mode the unrolled width = plateW × tileX (matches getTargetDims).
-  const baseW = params.shape === 'cylindrical' ? params.plateW * params.tileX : params.plateW;
+  // For custom-profile mode the unrolled grid is circumference × bandLength.
+  let baseW, baseH;
+  let customDims = null;
+  if (params.shape === 'customProfile') {
+    customDims = customProfileDims(params);
+    if (!customDims) {
+      showWarning('Load a DXF profile first.', false);
+      setExportEnabled(false);
+      return;
+    }
+    // Match getTargetDims: baseW = circumference (single revolution); the
+    // rasterizer stamps tileX copies inside that single-rev canvas.
+    baseW = customDims.circumference;
+    baseH = customDims.bandLength;
+  } else if (params.shape === 'cylindrical') {
+    baseW = params.plateW * params.tileX;
+    baseH = params.plateH;
+  } else {
+    baseW = params.plateW;
+    baseH = params.plateH;
+  }
   const pxPerMmX = baseW > 0 ? targetW / baseW : 0;
-  const pxPerMmY = params.plateH > 0 ? targetH / params.plateH : 0;
+  const pxPerMmY = baseH > 0 ? targetH / baseH : 0;
   // Fill the margin / alpha-composite background with whichever color ends
   // up at 0 relief after invert + mapDir, so the margin acts as a flat
   // border instead of a raised one. (Brightness/contrast can still shift it.)
@@ -708,7 +919,12 @@ function regeneratePipeline() {
     tileY: params.tileY,
     marginPxX: Math.round(params.marginX * pxPerMmX),
     marginPxY: Math.round(params.marginY * pxPerMmY),
-    fillColor
+    fillColor,
+    // Closed revolved surfaces: each tile must literally cover its share of
+    // the circumference, so fit each tile in its own box rather than fitting
+    // the combined tiled-source aspect into the canvas (which would
+    // letterbox tiles when bandLength ≪ circumference).
+    perTileFit: params.shape === 'customProfile'
   });
   const processed = processImage(raster, {
     brightness: params.brightness,
@@ -748,6 +964,19 @@ function regeneratePipeline() {
         sides: params.sides,
         closedBottom: params.closedBottom,
         chamferTop: params.chamferTop
+      });
+    } else if (params.shape === 'customProfile') {
+      // Resample the outer band to exactly Ny points (one per heightmap row),
+      // then splice it back into the profile so all band points sit at known
+      // row indices. Non-band points are revolved without any offset.
+      const { scaled, band } = customDims;
+      const Ny = heightmap.height;
+      const resampled = resampleSlice(scaled, band.startIdx, band.length, Ny);
+      const profilePts = spliceSlice(scaled, band.startIdx, band.length, resampled);
+      geom = buildCustomProfileGeometry(heightmap, {
+        profile: profilePts,
+        outerStart: 0,         // splice puts the resampled band at the front
+        outerLength: Ny
       });
     } else {
       geom = buildReliefGeometry(heightmap, {
@@ -820,6 +1049,14 @@ function exportFilename(ext, params) {
   }
   if (params.shape === 'polygon') {
     return `${name}_poly${params.sides}_W${W}xH${H}_h${f}mm${c}.${ext}`;
+  }
+  if (params.shape === 'customProfile') {
+    const rf = stripTrailing(params.radiusFactor);
+    const hf = stripTrailing(params.heightFactor);
+    const profileTag = state.profileFilename
+      ? state.profileFilename.replace(/\.[^.]+$/, '').replace(/[^A-Za-z0-9_-]+/g, '_')
+      : 'profile';
+    return `${name}_${profileTag}_r${rf}xh${hf}_h${f}mm${c}.${ext}`;
   }
   return `${name}_${W}x${H}_h${f}mm${c}.${ext}`;
 }

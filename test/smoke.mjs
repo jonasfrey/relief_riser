@@ -6,10 +6,16 @@ import {
   buildReliefGeometry,
   buildCylindricalGeometry,
   buildPolygonPrismGeometry,
+  buildCustomProfileGeometry,
   estimateTriangleCount,
   estimateCylindricalTriangleCount,
-  estimatePolygonPrismTriangleCount
+  estimatePolygonPrismTriangleCount,
+  estimateCustomProfileTriangleCount
 } from '../src/geometry.js';
+import { findOuterBand, resampleSlice, spliceSlice, parseDxfProfile } from '../src/dxfReader.js';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
 
 function makeHeightmap(w, h, factor = 0.4) {
   const data = new Float32Array(w * h);
@@ -391,5 +397,101 @@ checkPoly(4, 6, 6, polyChamferOpts);
 checkPoly(6, 8, 8, polyChamferOpts);
 checkPoly(4, 12, 12, { ...polyChamferOpts, closedBottom: false });
 checkPoly(8, 16, 12, polyChamferOpts, (i, j) => 0.4 * Math.sin(i * 0.3) * Math.cos(j * 0.4));
+
+// ---- custom-profile (revolved DXF) mesh checks ----
+
+function checkCustomNormals(geom) {
+  // Toroidal mesh: every triangle should have outward normal in the +radial
+  // direction relative to the rotation axis (Z). Inner faces of the profile
+  // (those with x < axis-side max) face inward, but in a torus all triangles
+  // bound a single connected solid — so outward = pointing away from the
+  // *solid interior*, not the rotation axis.
+  // We don't have a clean per-triangle expected direction without knowing
+  // the profile orientation, so we check global manifoldness + Euler χ = 0
+  // (torus topology) only.
+  return 0;
+}
+
+function checkCustom(profile, outerStart, outerLength, Nx, Ny, fillFn) {
+  const data = new Float32Array(Nx * Ny);
+  for (let j = 0; j < Ny; j++) for (let i = 0; i < Nx; i++) {
+    data[i + j * Nx] = fillFn ? fillFn(i, j) : 0.4 * (((i + j) & 1) ? 1 : 0);
+  }
+  // Resample band to Ny + splice — same flow as main.js
+  const resampled = resampleSlice(profile, outerStart, outerLength, Ny);
+  const profilePts = spliceSlice(profile, outerStart, outerLength, resampled);
+  const geom = buildCustomProfileGeometry({ data, width: Nx, height: Ny }, {
+    profile: profilePts,
+    outerStart: 0,
+    outerLength: Ny
+  });
+  const expected = estimateCustomProfileTriangleCount(Nx, profilePts.length);
+  if (geom.triCount !== expected) {
+    throw new Error(`custom tri count mismatch: ${geom.triCount} vs ${expected}`);
+  }
+  const m = checkManifold(geom);
+  const euler = geom.vertCount - m.uniqueEdges + m.triCount;
+  console.log(
+    `custom Np=${profilePts.length} Nx=${Nx} Ny=${Ny}: V=${geom.vertCount} E=${m.uniqueEdges} ` +
+    `F=${m.triCount} nonManifold=${m.nonManifold} boundary=${m.boundary} χ=${euler}`
+  );
+  if (m.nonManifold !== 0) throw new Error('custom: non-manifold edges');
+  if (m.boundary !== 0) throw new Error('custom: boundary edges (not watertight)');
+  if (euler !== 0) throw new Error(`custom: expected χ=0 (torus) got ${euler}`);
+  return { geom, profilePts };
+}
+
+// Synthetic rectangular profile: simple closed rectangle [10..14] × [0..6].
+// Outer band = right side (x = 14). Walking CCW: bottom-left → bottom-right →
+// top-right → top-left → close. The right side is two points (br, tr).
+{
+  const profile = [
+    [10, 0],   // bottom-left
+    [14, 0],   // bottom-right
+    [14, 6],   // top-right
+    [10, 6]    // top-left
+  ];
+  // Outer band detection with 50% width threshold: x > 12 → indices 1, 2 (br, tr)
+  const band = findOuterBand(profile, 2);
+  if (band.length !== 2 || band.startIdx !== 1) {
+    throw new Error(`rect band: got start=${band.startIdx} len=${band.length}, expected start=1 len=2`);
+  }
+  console.log(`custom: rectangle band detection ✓ (start=${band.startIdx} len=${band.length})`);
+  checkCustom(profile, band.startIdx, band.length, 8, 4);
+  checkCustom(profile, band.startIdx, band.length, 16, 8, (i, j) => 0.3 * Math.sin(i) * Math.cos(j));
+  checkCustom(profile, band.startIdx, band.length, 32, 12);
+}
+
+// Real DXF: parse the bundled default ring profile.
+{
+  const here = dirname(fileURLToPath(import.meta.url));
+  const dxfPath = resolve(here, '..', 'public', 'default_ring_profile.dxf');
+  const text = readFileSync(dxfPath, 'utf-8');
+  const { points } = parseDxfProfile(text);
+  console.log(`custom: parsed default DXF — ${points.length} points`);
+  if (points.length < 10) throw new Error('custom: default DXF parsed too few points');
+
+  // Width-based outer-band detection (50% of span)
+  let minX = Infinity, maxX = -Infinity;
+  for (const p of points) { if (p[0] < minX) minX = p[0]; if (p[0] > maxX) maxX = p[0]; }
+  const eps = (maxX - minX) * 0.5;
+  const band = findOuterBand(points, eps);
+  if (band.length < 2) throw new Error('custom: DXF outer band too short');
+  console.log(`custom: DXF band start=${band.startIdx} len=${band.length}/${points.length}`);
+
+  checkCustom(points, band.startIdx, band.length, 24, 8);
+  checkCustom(points, band.startIdx, band.length, 64, 16, (i, j) => 0.2 * (((i + j) & 1) ? 1 : 0));
+}
+
+// Reject profiles that touch / cross the axis
+try {
+  buildCustomProfileGeometry({ data: new Float32Array(8), width: 4, height: 2 }, {
+    profile: [[0, 0], [1, 0], [1, 1], [0, 1]], outerStart: 1, outerLength: 2
+  });
+  throw new Error('expected throw for profile touching axis');
+} catch (e) {
+  if (!/strictly outside the axis/.test(e.message)) throw e;
+  console.log('custom: rejects profile touching rotation axis ✓');
+}
 
 console.log('OK — all geometry checks passed');

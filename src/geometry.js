@@ -14,6 +14,11 @@ export function estimateCylindricalTriangleCount(Nx, Ny) {
   return 4 * Nx * Ny;
 }
 
+export function estimateCustomProfileTriangleCount(Nth, Nprofile) {
+  // Toroidal grid Nth × Nprofile, both directions wrap closed → 2·Nth·Nprofile triangles.
+  return 2 * Nth * Nprofile;
+}
+
 export function estimatePolygonPrismTriangleCount(N, NxPerFace, Ny, hasChamfer) {
   // With shared outer corners the outer is also a single closed ring. Both
   // inner and outer rings have NxRing = N·(Nx−1) vertices around. Surface =
@@ -549,5 +554,154 @@ export function buildPolygonPrismGeometry(heightmap, opts) {
     innerCount,
     NxRing,
     chamferCount
+  };
+}
+
+// Revolve a closed 2D profile around the Z (vertical) axis to form a torus-
+// topology solid. The "outer band" of the profile (a contiguous slice
+// already resampled to exactly Ny points = heightmap height) is offset
+// outward, vertex by vertex, by relief sampled from the heightmap.
+//
+// Coordinate convention
+//   - Profile X (horizontal) = radial distance from the rotation axis.
+//   - Profile Y (vertical)   = axial coord, mapped to world Z.
+//   - The profile must already be in real mm (apply your radius/height
+//     factors before passing it in).
+//   - Image columns wrap around the full 2π circumference; image rows
+//     map onto outer-band points in order, with row 0 → outerStart and
+//     row Ny−1 → outerStart+Ny−1.
+//
+// Inputs
+//   heightmap:  { data: Float32Array(Nx*Ny), width: Nx, height: Ny } — relief in mm
+//   opts.profile:    Array of [r, z] pairs, closed loop, no duplicate end vertex.
+//   opts.outerStart: index of first outer-band point in `profile`.
+//   opts.outerLength: number of consecutive outer-band points (must equal Ny).
+//
+// Topology: torus (V − E + F = 0) — both the angular ring (Nθ = Nx) and
+// the profile loop (Nprofile = profile.length) wrap closed, so the mesh
+// has no boundary edges and no caps are needed.
+export function buildCustomProfileGeometry(heightmap, opts) {
+  const Nx = heightmap.width;
+  const Ny = heightmap.height;
+  if (Nx < 3 || Ny < 2) {
+    throw new Error('Custom-profile mesh requires Nx >= 3 and Ny >= 2');
+  }
+  const profile = opts.profile;
+  if (!Array.isArray(profile) || profile.length < 3) {
+    throw new Error('Custom profile must be a closed loop of at least 3 points');
+  }
+  const Np = profile.length;
+  const outerStart  = opts.outerStart | 0;
+  const outerLength = opts.outerLength | 0;
+  if (outerLength !== Ny) {
+    throw new Error(`Custom profile: outer band length (${outerLength}) must equal Ny (${Ny})`);
+  }
+  if (outerLength > Np) {
+    throw new Error('Custom profile: outer band longer than profile');
+  }
+
+  // Mark which profile indices are outer band, and their image row 0..Ny−1.
+  // Image row 0 = top of the plate (max Z) by convention everywhere else in
+  // this codebase, so we orient the band so its high-Z end gets row 0.
+  const bandStartZ = profile[outerStart][1];
+  const bandEndZ   = profile[(outerStart + outerLength - 1) % Np][1];
+  const bandGoesDown = bandStartZ >= bandEndZ;   // start is the top (or tied)
+  const outerRow = new Int32Array(Np).fill(-1);
+  for (let k = 0; k < outerLength; k++) {
+    const row = bandGoesDown ? k : (outerLength - 1 - k);
+    outerRow[(outerStart + k) % Np] = row;
+  }
+
+  // Reject degenerate profiles (zero or negative radial coordinate after the
+  // outward relief offset would punch through the rotation axis).
+  let minR = Infinity;
+  for (const p of profile) if (p[0] < minR) minR = p[0];
+  if (minR <= 0) {
+    throw new Error('Custom profile: all radial coords must be > 0 (profile must lie strictly outside the axis)');
+  }
+
+  const totalVerts = Nx * Np;
+  const positions = new Float32Array(totalVerts * 3);
+
+  const cosT = new Float32Array(Nx);
+  const sinT = new Float32Array(Nx);
+  for (let k = 0; k < Nx; k++) {
+    const t = (k / Nx) * 2 * Math.PI;
+    cosT[k] = Math.cos(t);
+    sinT[k] = Math.sin(t);
+  }
+
+  // Build vertex grid. Vertex (k, i) at world index k * Np + i.
+  for (let i = 0; i < Np; i++) {
+    const r0 = profile[i][0];
+    const z  = profile[i][1];
+    const row = outerRow[i];
+    const isOuter = row >= 0;
+    for (let k = 0; k < Nx; k++) {
+      let r = r0;
+      if (isOuter) {
+        // Image row 0 sits at the TOP of the plate elsewhere in this app, so
+        // flip row so image row 0 maps to the outer-band point with the
+        // largest Z (top). We pick the orientation by checking which end of
+        // the band has the higher Z; if the band is approximately horizontal
+        // we fall back to mapping row 0 → outerStart.
+        r += heightmap.data[k + row * Nx];
+      }
+      const vi = (k * Np + i) * 3;
+      positions[vi]     = r * cosT[k];
+      positions[vi + 1] = r * sinT[k];
+      positions[vi + 2] = z;
+    }
+  }
+
+  const triCount = estimateCustomProfileTriangleCount(Nx, Np);
+  const indices = new Uint32Array(triCount * 3);
+  let p = 0;
+
+  // Determine winding direction so triangles face OUTWARD from the solid.
+  // The signed area of the profile (in the radial-axial plane) tells us
+  // whether the loop runs CCW or CW. Combined with our angular winding
+  // (CCW around +Z), CCW profile → standard winding; CW profile → flip.
+  let signedArea = 0;
+  for (let i = 0; i < Np; i++) {
+    const a = profile[i], b = profile[(i + 1) % Np];
+    signedArea += (b[0] - a[0]) * (b[1] + a[1]) * 0.5;
+  }
+  // Profile traversed CCW (positive area in standard math convention).
+  // Note: our area sum uses (Δx)·(y₁+y₂)/2 which is the trapezoid rule and
+  // gives the *negative* of the standard CCW area. So area > 0 ⇒ profile
+  // is CW in math convention ⇒ outward normal of the (k,k+1)×(i,i+1) quad
+  // points in the +radial direction with the standard winding below.
+  const flip = signedArea < 0;
+
+  // Each cell (k, i) → quad (k,i), (k+1,i), (k+1,i+1), (k,i+1) — both
+  // axes wrap (toroidal). Standard CCW winding for the +outward normal.
+  const idx = (k, i) => ((k % Nx + Nx) % Nx) * Np + ((i % Np + Np) % Np);
+  for (let k = 0; k < Nx; k++) {
+    for (let i = 0; i < Np; i++) {
+      const a = idx(k,     i);
+      const b = idx(k + 1, i);
+      const c = idx(k + 1, i + 1);
+      const d = idx(k,     i + 1);
+      if (flip) {
+        indices[p++] = a; indices[p++] = b; indices[p++] = c;
+        indices[p++] = a; indices[p++] = c; indices[p++] = d;
+      } else {
+        indices[p++] = a; indices[p++] = c; indices[p++] = b;
+        indices[p++] = a; indices[p++] = d; indices[p++] = c;
+      }
+    }
+  }
+
+  return {
+    positions,
+    indices,
+    triCount,
+    vertCount: totalVerts,
+    Nx,
+    Ny,
+    Np,
+    outerStart,
+    outerLength
   };
 }
