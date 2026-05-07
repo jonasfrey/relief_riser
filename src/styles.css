@@ -175,8 +175,16 @@ details.panel:not([open]) > summary::before {
 
 .preview-pair {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 220px);
   gap: 0.5rem;
+}
+
+.preview-large {
+  margin-top: 0.6rem;
+}
+
+.preview-large h3 {
+  margin-bottom: 0.3rem;
 }
 
 .img-preview {
@@ -189,6 +197,25 @@ details.panel:not([open]) > summary::before {
   image-rendering: pixelated;
   aspect-ratio: 1 / 1;
   object-fit: contain;
+}
+
+.img-preview-large {
+  /* Override the square thumbnail aspect — show the actual processed image
+     at full panel width so the user can read fine relief detail. */
+  aspect-ratio: auto;
+  min-height: 280px;
+  max-height: 60vh;
+}
+
+.histogram {
+  width: 100%;
+  height: 96px;
+  display: block;
+  background: #0c0c0c;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  margin-top: 0.4rem;
+  image-rendering: pixelated;
 }
 
 .control {

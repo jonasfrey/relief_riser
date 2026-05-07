@@ -152,31 +152,61 @@ export function processImage(rasterCanvas, params) {
     ? gaussianBlurGray(gray, w, h, params.blurRadius)
     : gray;
 
+  // Pre-levels min/max + 256-bin histogram describe the brightness
+  // distribution after brightness/contrast/blur. The UI uses min/max for
+  // auto-stretch and renders the histogram for visual feedback under the
+  // black/white-point sliders.
+  let dataMin = 255, dataMax = 0;
+  const histogram = new Uint32Array(256);
+  for (let i = 0; i < smoothed.length; i++) {
+    const v = smoothed[i];
+    if (v < dataMin) dataMin = v;
+    if (v > dataMax) dataMax = v;
+    histogram[v]++;
+  }
+  if (dataMax < dataMin) { dataMin = 0; dataMax = 255; }
+
+  // Levels: black point clamps dark pixels to 0, white point pushes bright
+  // pixels to 255, with a linear ramp between. Defaults (0, 255) = no-op.
+  // This is what kills the "plate" effect from a non-pure-black background.
+  const blackPt = Math.max(0, Math.min(254, params.blackPoint | 0));
+  const whitePt = Math.max(blackPt + 1, Math.min(255, params.whitePoint | 0));
+  const levRange = whitePt - blackPt;
+  const adjusted = (blackPt === 0 && whitePt === 255)
+    ? smoothed
+    : (() => {
+        const out = new Uint8ClampedArray(smoothed.length);
+        for (let i = 0; i < smoothed.length; i++) {
+          out[i] = ((smoothed[i] - blackPt) * 255) / levRange;
+        }
+        return out;
+      })();
+
   let levelMap;
   if (N === 1) {
     // Continuous grayscale: levelMap stores 0..255 for full-resolution heights
-    levelMap = new Uint8Array(smoothed.length);
-    for (let i = 0; i < smoothed.length; i++) levelMap[i] = smoothed[i];
+    levelMap = new Uint8Array(adjusted.length);
+    for (let i = 0; i < adjusted.length; i++) levelMap[i] = adjusted[i];
   } else if (N === 2) {
     const t = params.threshold;
-    levelMap = new Uint8Array(smoothed.length);
-    for (let i = 0; i < smoothed.length; i++) {
-      levelMap[i] = smoothed[i] > t ? 1 : 0;
+    levelMap = new Uint8Array(adjusted.length);
+    for (let i = 0; i < adjusted.length; i++) {
+      levelMap[i] = adjusted[i] > t ? 1 : 0;
     }
   } else {
-    levelMap = new Uint8Array(smoothed.length);
-    for (let i = 0; i < smoothed.length; i++) {
-      let k = Math.floor((smoothed[i] / 256) * N);
+    levelMap = new Uint8Array(adjusted.length);
+    for (let i = 0; i < adjusted.length; i++) {
+      let k = Math.floor((adjusted[i] / 256) * N);
       if (k >= N) k = N - 1;
       levelMap[i] = k;
     }
   }
 
   const displayImageData = N === 1
-    ? grayToImageData(smoothed, w, h)
+    ? grayToImageData(adjusted, w, h)
     : levelMapToImageData(levelMap, N, w, h);
 
-  return { displayImageData, levelMap, width: w, height: h, colorCount: N };
+  return { displayImageData, levelMap, width: w, height: h, colorCount: N, dataMin, dataMax, histogram };
 }
 
 // Map a quantized level map (0..N-1) and per-layer mm heights to an absolute

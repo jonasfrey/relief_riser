@@ -64,15 +64,45 @@
               <h3>Source <span id="cropBadge" class="badge hidden">cropped</span></h3>
               <canvas id="originalCanvas" class="img-preview"></canvas>
             </div>
-            <div>
-              <h3>Processed (heightmap)</h3>
-              <canvas id="processedCanvas" class="img-preview"></canvas>
+          </div>
+          <div class="preview-large">
+            <h3>Processed (heightmap)</h3>
+            <canvas id="processedCanvas" class="img-preview img-preview-large"></canvas>
+            <div class="control inline">
+              <label><input type="checkbox" id="showClipping" /> Highlight clipping (under→white, over→black)</label>
             </div>
+            <canvas id="histogramCanvas" class="histogram"></canvas>
           </div>
         </div>
 
         <details class="panel" open>
           <summary><h2>2. Image editor</h2></summary>
+
+          <div class="control inline">
+            <label><input type="checkbox" id="invert" /> Invert grayscale</label>
+          </div>
+
+          <div class="control">
+            <label for="blur">Gaussian blur (px)</label>
+            <input type="range" id="blur" min="0" max="10" step="0.5" value="0" />
+            <input type="number" id="blurNum" min="0" max="10" step="0.5" value="0" />
+          </div>
+
+          <div class="control">
+            <label for="blackPoint">Black point (0–255) — pixels at or below map to 0 relief</label>
+            <input type="range" id="blackPoint" min="0" max="254" step="1" value="0" />
+            <input type="number" id="blackPointNum" min="0" max="254" step="1" value="0" />
+          </div>
+
+          <div class="control">
+            <label for="whitePoint">White point (1–255) — pixels at or above map to max relief</label>
+            <input type="range" id="whitePoint" min="1" max="255" step="1" value="255" />
+            <input type="number" id="whitePointNum" min="1" max="255" step="1" value="255" />
+          </div>
+
+          <div class="control inline">
+            <button type="button" id="autoStretch">Auto-stretch levels</button>
+          </div>
 
           <div class="control">
             <label for="brightness">Brightness</label>
@@ -84,12 +114,6 @@
             <label for="contrast">Contrast</label>
             <input type="range" id="contrast" min="-100" max="100" step="1" value="0" />
             <input type="number" id="contrastNum" min="-100" max="100" step="1" value="0" />
-          </div>
-
-          <div class="control">
-            <label for="blur">Gaussian blur (px)</label>
-            <input type="range" id="blur" min="0" max="10" step="0.5" value="0" />
-            <input type="number" id="blurNum" min="0" max="10" step="0.5" value="0" />
           </div>
 
           <div class="control">
@@ -110,10 +134,6 @@
             <label for="threshold">Threshold (0–255) — boundary between the 2 colors</label>
             <input type="range" id="threshold" min="0" max="255" step="1" value="128" />
             <input type="number" id="thresholdNum" min="0" max="255" step="1" value="128" />
-          </div>
-
-          <div class="control inline">
-            <label><input type="checkbox" id="invert" /> Invert grayscale</label>
           </div>
 
           <div class="control">

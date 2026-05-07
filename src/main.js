@@ -45,6 +45,8 @@ const els = {
   dropZone: $('dropZone'),
   originalCanvas: $('originalCanvas'),
   processedCanvas: $('processedCanvas'),
+  histogramCanvas: $('histogramCanvas'),
+  showClipping: $('showClipping'),
   stlControls: $('stlControls'),
   stlSide: $('stlSide'),
   stlRenderSize: $('stlRenderSize'),
@@ -55,6 +57,9 @@ const els = {
   blur: $('blur'),                   blurNum: $('blurNum'),
   threshold: $('threshold'),         thresholdNum: $('thresholdNum'),
   thresholdControl: $('thresholdControl'),
+  blackPoint: $('blackPoint'),       blackPointNum: $('blackPointNum'),
+  whitePoint: $('whitePoint'),       whitePointNum: $('whitePointNum'),
+  autoStretch: $('autoStretch'),
   invert: $('invert'),
   colorCount: $('colorCount'),
   resolutionMode: $('resolutionMode'),
@@ -119,6 +124,8 @@ const sliderPairs = [
   ['contrast', 'contrastNum'],
   ['blur', 'blurNum'],
   ['threshold', 'thresholdNum'],
+  ['blackPoint', 'blackPointNum'],
+  ['whitePoint', 'whitePointNum'],
   ['maxDim', 'maxDimNum'],
   ['density', 'densityNum'],
   ['sides', 'sidesNum'],
@@ -168,6 +175,34 @@ sliderPairs.forEach(([r, n]) => linkPair(els[r], els[n]));
 
 ['invert', 'mapDir', 'fitMode', 'closedBottom'].forEach((id) => {
   els[id].addEventListener('change', () => onParamChange());
+});
+
+// Clipping highlight only changes how the processed canvas is painted, not
+// the heightmap or geometry — repaint from the cached processed result so we
+// don't waste a full pipeline pass.
+els.showClipping.addEventListener('change', () => {
+  if (state.processed) paintProcessedCanvas(state.processed);
+  persist();
+});
+
+// Auto-stretch reads the actual brightness range from the most recent
+// processed image (post brightness/contrast/blur, pre-levels) and pins the
+// black/white points to it so the full [0, max] relief band is used and the
+// background sits at exactly 0 relief.
+els.autoStretch.addEventListener('click', () => {
+  const p = state.processed;
+  if (!p) return;
+  let lo = p.dataMin | 0;
+  let hi = p.dataMax | 0;
+  if (hi <= lo) hi = lo + 1;
+  if (lo > 254) lo = 254;
+  if (hi < 1) hi = 1;
+  if (hi > 255) hi = 255;
+  els.blackPoint.value = String(lo);
+  els.blackPointNum.value = String(lo);
+  els.whitePoint.value = String(hi);
+  els.whitePointNum.value = String(hi);
+  onParamChange();
 });
 
 els.shape.addEventListener('change', () => {
@@ -508,6 +543,8 @@ function readParamsFromUI() {
     contrast: parseFloat(els.contrast.value),
     blurRadius: parseFloat(els.blur.value),
     threshold: parseInt(els.threshold.value, 10),
+    blackPoint: parseInt(els.blackPoint.value, 10),
+    whitePoint: parseInt(els.whitePoint.value, 10),
     invert: els.invert.checked,
     colorCount: state.colorCount,
     layerHeights: state.layerHeights.slice(0, state.colorCount),
@@ -537,7 +574,8 @@ function readParamsFromUI() {
     stlRenderSize: parseInt(els.stlRenderSize.value, 10) || STL_RENDER_MAX_DIM_DEFAULT,
     display: { ...state.display },
 
-    asciiSTL: els.asciiSTL.checked
+    asciiSTL: els.asciiSTL.checked,
+    showClipping: els.showClipping.checked
   };
 }
 
@@ -552,6 +590,8 @@ function writeParamsToUI(p) {
   setNum('contrast', 'contrastNum', p.contrast);
   setNum('blur', 'blurNum', p.blurRadius);
   setNum('threshold', 'thresholdNum', p.threshold);
+  setNum('blackPoint', 'blackPointNum', p.blackPoint);
+  setNum('whitePoint', 'whitePointNum', p.whitePoint);
   setNum('maxDim', 'maxDimNum', p.maxDim);
   setNum('density', 'densityNum', p.density);
   setNum('sides', 'sidesNum', p.sides);
@@ -571,6 +611,7 @@ function writeParamsToUI(p) {
   if (p.mapDir) els.mapDir.value = p.mapDir;
   if (p.fitMode) els.fitMode.value = p.fitMode;
   if (p.asciiSTL != null) els.asciiSTL.checked = !!p.asciiSTL;
+  if (p.showClipping != null) els.showClipping.checked = !!p.showClipping;
   if (p.colorCount) {
     state.colorCount = Math.max(1, Math.min(8, p.colorCount | 0));
     els.colorCount.value = String(state.colorCount);
@@ -750,6 +791,89 @@ function canvasToImageData(c) {
   return ctx.getImageData(0, 0, c.width, c.height);
 }
 
+// Paint the processed (heightmap) preview, optionally with a clipping
+// highlight: pure-black pixels (under the black point → 0 relief) are shown
+// as white and pure-white pixels (above the white point → max relief) are
+// shown as black, so clipped regions jump out visually. Mid-tone pixels
+// pass through unchanged so the grayscale heightmap reads normally.
+function paintProcessedCanvas(processed) {
+  const imgData = processed.displayImageData;
+  if (!els.showClipping.checked) {
+    paintToCanvas(imgData, els.processedCanvas);
+    return;
+  }
+  const w = imgData.width, h = imgData.height;
+  const out = new ImageData(w, h);
+  const src = imgData.data;
+  const dst = out.data;
+  for (let i = 0; i < src.length; i += 4) {
+    const r = src[i], g = src[i + 1], b = src[i + 2];
+    if (r === 0 && g === 0 && b === 0) {
+      dst[i] = dst[i + 1] = dst[i + 2] = 255;
+    } else if (r === 255 && g === 255 && b === 255) {
+      dst[i] = dst[i + 1] = dst[i + 2] = 0;
+    } else {
+      dst[i] = r; dst[i + 1] = g; dst[i + 2] = b;
+    }
+    dst[i + 3] = src[i + 3];
+  }
+  paintToCanvas(out, els.processedCanvas);
+}
+
+// Render a 256-bin brightness histogram with black/white-point markers
+// overlaid. Bins are computed in processImage from the post-blur, pre-levels
+// `smoothed` array, so the bars show the actual brightness distribution the
+// user is mapping with the Levels sliders. Uses log scale so a single huge
+// background bin doesn't crush the rest of the distribution flat.
+function paintHistogram(processed, params) {
+  const canvas = els.histogramCanvas;
+  if (!canvas) return;
+  const cssW = canvas.clientWidth || canvas.parentElement?.clientWidth || 256;
+  const cssH = canvas.clientHeight || 96;
+  const dpr = window.devicePixelRatio || 1;
+  const W = Math.max(64, Math.round(cssW * dpr));
+  const H = Math.max(32, Math.round(cssH * dpr));
+  if (canvas.width !== W) canvas.width = W;
+  if (canvas.height !== H) canvas.height = H;
+
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, W, H);
+
+  const hist = processed && processed.histogram;
+  if (!hist) return;
+
+  let maxCount = 0;
+  for (let i = 0; i < 256; i++) if (hist[i] > maxCount) maxCount = hist[i];
+  if (maxCount === 0) return;
+  const logMax = Math.log1p(maxCount);
+
+  const binW = W / 256;
+  ctx.fillStyle = '#888';
+  for (let i = 0; i < 256; i++) {
+    if (hist[i] === 0) continue;
+    const h = (Math.log1p(hist[i]) / logMax) * (H - 2);
+    ctx.fillRect(i * binW, H - h, Math.max(1, binW), h);
+  }
+
+  // Black/white-point markers. Black point = the cutoff below which pixels
+  // are clamped to 0 relief; white point = the cutoff above which they hit
+  // max. Drawn as full-height vertical lines so they're easy to align with
+  // the histogram peaks.
+  const black = Math.max(0, Math.min(254, params.blackPoint | 0));
+  const white = Math.max(black + 1, Math.min(255, params.whitePoint | 0));
+  ctx.lineWidth = Math.max(1, dpr);
+  ctx.strokeStyle = '#3a86ff';
+  ctx.beginPath();
+  ctx.moveTo(black * binW + 0.5, 0);
+  ctx.lineTo(black * binW + 0.5, H);
+  ctx.stroke();
+  ctx.strokeStyle = '#ffd166';
+  ctx.beginPath();
+  ctx.moveTo(white * binW + 0.5, 0);
+  ctx.lineTo(white * binW + 0.5, H);
+  ctx.stroke();
+}
+
 // ---------- pipeline ----------
 
 const TRI_AUTO_LIMIT = 500_000;
@@ -845,6 +969,11 @@ function triggerProcessing(immediate) {
   }
   if (processTimer) clearTimeout(processTimer);
 
+  // Always run the preview phase synchronously — it's the only thing that
+  // gives the user instant feedback for sliders. The expensive mesh build
+  // happens after, gated by the triangle-count thresholds below.
+  if (!regeneratePreview()) return;
+
   const params = readParamsFromUI();
   const { targetW, targetH } = getTargetDims(params);
   const profileLen = state.profilePoints ? state.profilePoints.length : 0;
@@ -872,13 +1001,17 @@ function triggerProcessing(immediate) {
   els.regenButtonWrap.classList.add('hidden');
 
   const delay = immediate ? 0 : 150;
-  processTimer = setTimeout(() => regeneratePipeline(), delay);
+  processTimer = setTimeout(() => regenerateMesh(), delay);
 }
 
 els.regenBtn.addEventListener('click', () => regeneratePipeline());
 
-function regeneratePipeline() {
-  if (!state.sourceCanvas) return;
+// Phase 1 of the pipeline: rasterize → processImage → paint preview canvas
+// + histogram → build heightmap. Cheap relative to mesh build, so it always
+// runs synchronously on slider changes for instant UI feedback. Returns
+// false if the preview can't be built (e.g. customProfile with no DXF yet).
+function regeneratePreview() {
+  if (!state.sourceCanvas) return false;
   maybeReprojectStl();
   const params = readParamsFromUI();
   const { targetW, targetH } = getTargetDims(params);
@@ -893,7 +1026,7 @@ function regeneratePipeline() {
     if (!customDims) {
       showWarning('Load a DXF profile first.', false);
       setExportEnabled(false);
-      return;
+      return false;
     }
     // Match getTargetDims: baseW = circumference (single revolution); the
     // rasterizer stamps tileX copies inside that single-rev canvas.
@@ -909,11 +1042,12 @@ function regeneratePipeline() {
   const pxPerMmX = baseW > 0 ? targetW / baseW : 0;
   const pxPerMmY = baseH > 0 ? targetH / baseH : 0;
   // Fill the margin / alpha-composite background with whichever color ends
-  // up at 0 relief after invert + mapDir, so the margin acts as a flat
-  // border instead of a raised one. (Brightness/contrast can still shift it.)
+  // up at 0 relief after mapDir, so the margin acts as a flat border instead
+  // of a raised one. (Brightness/contrast can still shift it.) `invert` no
+  // longer flips grayscale here — it's an engrave-mode toggle applied to the
+  // heightmap below, which leaves the margin neutral either way.
   const lowReliefAfter = params.mapDir === 'black' ? 255 : 0;
-  const lowReliefBefore = params.invert ? 255 - lowReliefAfter : lowReliefAfter;
-  const fillColor = lowReliefBefore === 0 ? '#000000' : '#ffffff';
+  const fillColor = lowReliefAfter === 0 ? '#000000' : '#ffffff';
   const raster = rasterize(state.sourceCanvas, targetW, targetH, params.fitMode, {
     tileX: params.tileX,
     tileY: params.tileY,
@@ -930,20 +1064,42 @@ function regeneratePipeline() {
     brightness: params.brightness,
     contrast: params.contrast,
     blurRadius: params.blurRadius,
-    invert: params.invert,
+    invert: false,
     threshold: params.threshold,
+    blackPoint: params.blackPoint,
+    whitePoint: params.whitePoint,
     colorCount: params.colorCount
   });
   state.processed = processed;
-  paintToCanvas(processed.displayImageData, els.processedCanvas);
+  paintProcessedCanvas(processed);
+  paintHistogram(processed, params);
 
   const heightmapMm = buildHeightmap(processed, {
     layerHeights: params.layerHeights,
     invertHeight: params.mapDir === 'black'
   });
+  // "Invert grayscale" now means engrave: relief carves INTO the base wall
+  // instead of protruding outward. Negate the heightmap so geometry's
+  // `base + relief` becomes `base - depth`, removing the cuboid pedestal that
+  // appears when the whole image area is pushed outward.
+  if (params.invert) {
+    for (let i = 0; i < heightmapMm.length; i++) heightmapMm[i] = -heightmapMm[i];
+  }
   state.heightmapMm = heightmapMm;
+  state.lastHeightmap = { data: heightmapMm, width: processed.width, height: processed.height };
+  state.lastCustomDims = customDims;
+  state.lastParamsForMesh = params;
+  return true;
+}
 
-  const heightmap = { data: heightmapMm, width: processed.width, height: processed.height };
+// Phase 2: build geometry from the cached heightmap and push it to the
+// viewer. Slow at high triangle counts, so callers may debounce or gate
+// this on user click while still letting regeneratePreview run instantly.
+function regenerateMesh() {
+  const heightmap = state.lastHeightmap;
+  const params = state.lastParamsForMesh;
+  const customDims = state.lastCustomDims;
+  if (!heightmap || !params) return;
 
   let geom;
   try {
@@ -969,6 +1125,7 @@ function regeneratePipeline() {
       // Resample the outer band to exactly Ny points (one per heightmap row),
       // then splice it back into the profile so all band points sit at known
       // row indices. Non-band points are revolved without any offset.
+      if (!customDims) return;
       const { scaled, band } = customDims;
       const Ny = heightmap.height;
       const resampled = resampleSlice(scaled, band.startIdx, band.length, Ny);
@@ -996,6 +1153,10 @@ function regeneratePipeline() {
 
   setExportEnabled(true);
   updateStats({ tris: geom.triCount, verts: geom.vertCount });
+}
+
+function regeneratePipeline() {
+  if (regeneratePreview()) regenerateMesh();
 }
 
 // ---------- UI helpers ----------
