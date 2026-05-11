@@ -134,13 +134,18 @@ export function processImage(rasterCanvas, params) {
   const imgData = ctx.getImageData(0, 0, w, h);
   const data = imgData.data;
 
-  // grayscale + brightness + contrast + invert into a single 8-bit array
+  // Float pipeline: grayscale + brightness + contrast + invert into a Float32
+  // array. Source data is uint8, but the moment we blur or apply levels the
+  // arithmetic produces meaningful sub-integer values; quantizing each stage
+  // back to uint8 throws those away and creates visible terracing on smooth
+  // gradients in the final 3D mesh. We only quantize at the very end (display
+  // canvas + integer levelMap for quantized color modes).
   const brightness = params.brightness * 2.55;
   const c = params.contrast;
   const contrastFactor = (259 * (c + 255)) / (255 * (259 - c));
   const N = Math.max(1, Math.min(8, params.colorCount | 0));
 
-  const gray = new Uint8ClampedArray(w * h);
+  const gray = new Float32Array(w * h);
   for (let i = 0, j = 0; i < gray.length; i++, j += 4) {
     let g = 0.299 * data[j] + 0.587 * data[j + 1] + 0.114 * data[j + 2];
     g = contrastFactor * (g - 128) + 128 + brightness;
@@ -155,14 +160,16 @@ export function processImage(rasterCanvas, params) {
   // Pre-levels min/max + 256-bin histogram describe the brightness
   // distribution after brightness/contrast/blur. The UI uses min/max for
   // auto-stretch and renders the histogram for visual feedback under the
-  // black/white-point sliders.
+  // black/white-point sliders. Clamp to [0,255] for binning since brightness/
+  // contrast can push the float values outside that range.
   let dataMin = 255, dataMax = 0;
   const histogram = new Uint32Array(256);
   for (let i = 0; i < smoothed.length; i++) {
-    const v = smoothed[i];
+    let v = smoothed[i];
+    if (v < 0) v = 0; else if (v > 255) v = 255;
     if (v < dataMin) dataMin = v;
     if (v > dataMax) dataMax = v;
-    histogram[v]++;
+    histogram[v | 0]++;
   }
   if (dataMax < dataMin) { dataMin = 0; dataMax = 255; }
 
@@ -172,21 +179,30 @@ export function processImage(rasterCanvas, params) {
   const blackPt = Math.max(0, Math.min(254, params.blackPoint | 0));
   const whitePt = Math.max(blackPt + 1, Math.min(255, params.whitePoint | 0));
   const levRange = whitePt - blackPt;
-  const adjusted = (blackPt === 0 && whitePt === 255)
-    ? smoothed
-    : (() => {
-        const out = new Uint8ClampedArray(smoothed.length);
-        for (let i = 0; i < smoothed.length; i++) {
-          out[i] = ((smoothed[i] - blackPt) * 255) / levRange;
-        }
-        return out;
-      })();
+  const levelsActive = blackPt !== 0 || whitePt !== 255;
+  const adjusted = levelsActive ? new Float32Array(smoothed.length) : smoothed;
+  if (levelsActive) {
+    for (let i = 0; i < smoothed.length; i++) {
+      let v = (smoothed[i] - blackPt) * 255 / levRange;
+      if (v < 0) v = 0; else if (v > 255) v = 255;
+      adjusted[i] = v;
+    }
+  }
 
+  // levelMap (uint8) is used for display + quantized-color heightmap lookups.
+  // levelsFloat (the same float array) is used by buildHeightmap in N=1 mode
+  // so the continuous lithophane heightmap retains full sub-integer precision
+  // from the blur + levels pipeline.
   let levelMap;
+  let levelsFloat = null;
   if (N === 1) {
-    // Continuous grayscale: levelMap stores 0..255 for full-resolution heights
+    levelsFloat = adjusted;
     levelMap = new Uint8Array(adjusted.length);
-    for (let i = 0; i < adjusted.length; i++) levelMap[i] = adjusted[i];
+    for (let i = 0; i < adjusted.length; i++) {
+      let v = adjusted[i];
+      if (v < 0) v = 0; else if (v > 255) v = 255;
+      levelMap[i] = v;
+    }
   } else if (N === 2) {
     const t = params.threshold;
     levelMap = new Uint8Array(adjusted.length);
@@ -196,7 +212,9 @@ export function processImage(rasterCanvas, params) {
   } else {
     levelMap = new Uint8Array(adjusted.length);
     for (let i = 0; i < adjusted.length; i++) {
-      let k = Math.floor((adjusted[i] / 256) * N);
+      let v = adjusted[i];
+      if (v < 0) v = 0; else if (v > 255) v = 255;
+      let k = Math.floor((v / 256) * N);
       if (k >= N) k = N - 1;
       levelMap[i] = k;
     }
@@ -206,7 +224,7 @@ export function processImage(rasterCanvas, params) {
     ? grayToImageData(adjusted, w, h)
     : levelMapToImageData(levelMap, N, w, h);
 
-  return { displayImageData, levelMap, width: w, height: h, colorCount: N, dataMin, dataMax, histogram };
+  return { displayImageData, levelMap, levelsFloat, width: w, height: h, colorCount: N, dataMin, dataMax, histogram };
 }
 
 // Map a quantized level map (0..N-1) and per-layer mm heights to an absolute
@@ -219,10 +237,22 @@ export function buildHeightmap(processed, params) {
 
   if (N === 1) {
     const max = Number(params.layerHeights[0]) || 0;
+    // Prefer the float source from processImage so smooth gradients don't
+    // terrace on the way to mm heights. Falls back to uint8 levelMap if a
+    // caller hands in a processed result without levelsFloat.
+    const src = processed.levelsFloat || processed.levelMap;
     if (params.invertHeight) {
-      for (let i = 0; i < len; i++) out[i] = (1 - processed.levelMap[i] / 255) * max;
+      for (let i = 0; i < len; i++) {
+        let v = src[i];
+        if (v < 0) v = 0; else if (v > 255) v = 255;
+        out[i] = (1 - v / 255) * max;
+      }
     } else {
-      for (let i = 0; i < len; i++) out[i] = (processed.levelMap[i] / 255) * max;
+      for (let i = 0; i < len; i++) {
+        let v = src[i];
+        if (v < 0) v = 0; else if (v > 255) v = 255;
+        out[i] = (v / 255) * max;
+      }
     }
   } else {
     const heights = params.layerHeights.slice(0, N).map((v) => Number(v) || 0);
@@ -281,7 +311,10 @@ function gaussianBlurGray(src, w, h, radius) {
     }
   }
 
-  const out = new Uint8ClampedArray(w * h);
+  // Float32 output: skip the round-to-uint8 step that used to truncate the
+  // averaged neighbour values. processImage() does any clamping it needs at
+  // the end of the pipeline.
+  const out = new Float32Array(w * h);
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       let acc = 0;
@@ -290,8 +323,7 @@ function gaussianBlurGray(src, w, h, radius) {
         if (sy < 0) sy = 0; else if (sy >= h) sy = h - 1;
         acc += tmp[sy * w + x] * kernel[k + r];
       }
-      const v = Math.round(acc);
-      out[y * w + x] = v < 0 ? 0 : v > 255 ? 255 : v;
+      out[y * w + x] = acc;
     }
   }
   return out;

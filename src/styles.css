@@ -207,6 +207,35 @@ details.panel:not([open]) > summary::before {
   max-height: 60vh;
 }
 
+.source-canvas {
+  cursor: crosshair;
+}
+
+.crop-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-top: 0.4rem;
+  font-size: 0.82rem;
+}
+
+.crop-controls .crop-status {
+  color: var(--text-dim);
+}
+
+.crop-controls button {
+  font-size: 0.8rem;
+  padding: 2px 8px;
+}
+
+.hint {
+  margin: 0.3rem 0 0;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  line-height: 1.3;
+}
+
 .histogram {
   width: 100%;
   height: 96px;

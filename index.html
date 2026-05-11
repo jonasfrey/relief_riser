@@ -62,7 +62,12 @@
           <div class="preview-pair">
             <div>
               <h3>Source <span id="cropBadge" class="badge hidden">cropped</span></h3>
-              <canvas id="originalCanvas" class="img-preview"></canvas>
+              <canvas id="originalCanvas" class="img-preview source-canvas"></canvas>
+              <div class="crop-controls">
+                <span class="crop-status">Polygon crop: <span id="cropPolyStatus">0/4</span></span>
+                <button type="button" id="cropPolyClear">Clear</button>
+              </div>
+              <p class="hint">Click the source to place up to 4 corners. Drag a corner to adjust. When all 4 are set, only pixels inside the polygon become relief.</p>
             </div>
           </div>
           <div class="preview-large">

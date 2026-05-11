@@ -47,6 +47,8 @@ const els = {
   processedCanvas: $('processedCanvas'),
   histogramCanvas: $('histogramCanvas'),
   showClipping: $('showClipping'),
+  cropPolyStatus: $('cropPolyStatus'),
+  cropPolyClear: $('cropPolyClear'),
   stlControls: $('stlControls'),
   stlSide: $('stlSide'),
   stlRenderSize: $('stlRenderSize'),
@@ -327,7 +329,13 @@ const state = {
   // profileSource: 'default' | 'user' | null
   profilePoints: null,
   profileSource: null,
-  profileFilename: null
+  profileFilename: null,
+  // 4-point polygon mask in source-image pixel coords. Pixels outside the
+  // polygon are replaced with the relief-zero fill color before rasterization,
+  // so the rectangular border around a relief design doesn't end up in the
+  // mesh. Always 0..4 entries; the mask is only applied when length === 4.
+  cropPolygon: [],
+  cropDragIndex: -1
 };
 
 const viewer = new Viewer(els.viewport);
@@ -505,8 +513,187 @@ function applyAutoCrop() {
     state.sourceCanvas = state.rawSourceCanvas;
   }
   els.cropBadge.classList.toggle('hidden', !usingCrop);
-  paintToCanvas(canvasToImageData(state.sourceCanvas), els.originalCanvas);
+  // Polygon coords are in source-canvas pixel space, so they're only valid
+  // while the source dimensions stay the same. Rotation, the auto-crop
+  // toggle, or loading a new image all invalidate them — drop the polygon
+  // rather than silently misalign it with the new content. The first call
+  // (lastSourceDims unset) preserves whatever persistence restored.
+  const w = state.sourceCanvas.width;
+  const h = state.sourceCanvas.height;
+  if (state.cropPolygon.length > 0 && state.lastSourceDims) {
+    if (state.lastSourceDims.w !== w || state.lastSourceDims.h !== h) {
+      state.cropPolygon = [];
+      state.cropDragIndex = -1;
+    }
+  }
+  state.lastSourceDims = { w, h };
+  paintSourceWithOverlay();
+  updateCropStatus();
 }
+
+// --------- polygon crop ---------
+
+// Paint the source canvas plus the polygon overlay (dim outside, blue
+// outline, draggable handles). Replaces the plain paintToCanvas call we used
+// to do directly so any source-canvas update keeps the polygon visible.
+function paintSourceWithOverlay() {
+  if (!state.sourceCanvas) return;
+  const canvas = els.originalCanvas;
+  const w = state.sourceCanvas.width;
+  const h = state.sourceCanvas.height;
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(state.sourceCanvas, 0, 0);
+
+  const poly = state.cropPolygon;
+  if (!poly || poly.length === 0) return;
+
+  // Dim the area outside the polygon when it's complete (4 points). Uses
+  // even-odd fill against the canvas rect so the polygon interior stays
+  // un-dimmed.
+  if (poly.length === 4) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, w, h);
+    ctx.moveTo(poly[0].x, poly[0].y);
+    for (let i = poly.length - 1; i >= 1; i--) ctx.lineTo(poly[i].x, poly[i].y);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fill('evenodd');
+    ctx.restore();
+  }
+
+  const lineW = Math.max(1.5, Math.min(w, h) / 250);
+  ctx.strokeStyle = '#3a86ff';
+  ctx.lineWidth = lineW;
+  ctx.beginPath();
+  ctx.moveTo(poly[0].x, poly[0].y);
+  for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i].x, poly[i].y);
+  if (poly.length === 4) ctx.closePath();
+  ctx.stroke();
+
+  const r = Math.max(4, Math.min(w, h) / 80);
+  for (let i = 0; i < poly.length; i++) {
+    ctx.beginPath();
+    ctx.arc(poly[i].x, poly[i].y, r, 0, 2 * Math.PI);
+    ctx.fillStyle = '#3a86ff';
+    ctx.fill();
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = Math.max(1, lineW);
+    ctx.stroke();
+  }
+}
+
+function updateCropStatus() {
+  if (!els.cropPolyStatus) return;
+  const n = state.cropPolygon.length;
+  els.cropPolyStatus.textContent = `${n}/4` + (n === 4 ? ' (active)' : '');
+  els.cropPolyClear.disabled = n === 0;
+}
+
+// Convert a pointer event on the originalCanvas to source-canvas pixel coords.
+function eventToSourceCoords(e) {
+  const canvas = els.originalCanvas;
+  const rect = canvas.getBoundingClientRect();
+  const sx = (e.clientX - rect.left) * canvas.width  / rect.width;
+  const sy = (e.clientY - rect.top)  * canvas.height / rect.height;
+  return { x: sx, y: sy };
+}
+
+function findPolygonHandle(pt) {
+  if (!state.sourceCanvas) return -1;
+  const w = state.sourceCanvas.width;
+  const h = state.sourceCanvas.height;
+  // Match the visual handle radius plus a little slack for easier grabbing.
+  const rPick = Math.max(8, Math.min(w, h) / 60);
+  let best = -1;
+  let bestD = rPick * rPick;
+  for (let i = 0; i < state.cropPolygon.length; i++) {
+    const dx = state.cropPolygon[i].x - pt.x;
+    const dy = state.cropPolygon[i].y - pt.y;
+    const d2 = dx * dx + dy * dy;
+    if (d2 <= bestD) { bestD = d2; best = i; }
+  }
+  return best;
+}
+
+// Build a copy of the source canvas with everything outside the 4-point
+// polygon replaced by `fillColor` — that color is already chosen elsewhere to
+// map to 0 relief, so masked pixels sit flush with the wall.
+function getMaskedSourceCanvas(sourceCanvas, polygon, fillColor) {
+  if (!polygon || polygon.length !== 4) return sourceCanvas;
+  const w = sourceCanvas.width;
+  const h = sourceCanvas.height;
+  const out = document.createElement('canvas');
+  out.width = w;
+  out.height = h;
+  const ctx = out.getContext('2d');
+  ctx.fillStyle = fillColor;
+  ctx.fillRect(0, 0, w, h);
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(polygon[0].x, polygon[0].y);
+  for (let i = 1; i < polygon.length; i++) ctx.lineTo(polygon[i].x, polygon[i].y);
+  ctx.closePath();
+  ctx.clip();
+  ctx.drawImage(sourceCanvas, 0, 0);
+  ctx.restore();
+  return out;
+}
+
+els.originalCanvas.addEventListener('pointerdown', (e) => {
+  if (!state.sourceCanvas) return;
+  const pt = eventToSourceCoords(e);
+  const hit = findPolygonHandle(pt);
+  if (hit >= 0) {
+    state.cropDragIndex = hit;
+  } else if (state.cropPolygon.length < 4) {
+    state.cropPolygon.push({ x: pt.x, y: pt.y });
+    state.cropDragIndex = state.cropPolygon.length - 1;
+    paintSourceWithOverlay();
+    updateCropStatus();
+    persist();
+    if (state.cropPolygon.length === 4) onParamChange();
+    return;
+  } else {
+    return;
+  }
+  els.originalCanvas.setPointerCapture(e.pointerId);
+});
+
+els.originalCanvas.addEventListener('pointermove', (e) => {
+  if (state.cropDragIndex < 0 || !state.sourceCanvas) return;
+  const pt = eventToSourceCoords(e);
+  const w = state.sourceCanvas.width;
+  const h = state.sourceCanvas.height;
+  pt.x = Math.max(0, Math.min(w, pt.x));
+  pt.y = Math.max(0, Math.min(h, pt.y));
+  state.cropPolygon[state.cropDragIndex] = pt;
+  paintSourceWithOverlay();
+});
+
+const endPolygonDrag = (e) => {
+  if (state.cropDragIndex < 0) return;
+  state.cropDragIndex = -1;
+  if (e && e.pointerId != null && els.originalCanvas.hasPointerCapture(e.pointerId)) {
+    els.originalCanvas.releasePointerCapture(e.pointerId);
+  }
+  persist();
+  if (state.cropPolygon.length === 4) onParamChange();
+};
+els.originalCanvas.addEventListener('pointerup', endPolygonDrag);
+els.originalCanvas.addEventListener('pointercancel', endPolygonDrag);
+
+els.cropPolyClear.addEventListener('click', () => {
+  if (state.cropPolygon.length === 0) return;
+  state.cropPolygon = [];
+  state.cropDragIndex = -1;
+  paintSourceWithOverlay();
+  updateCropStatus();
+  persist();
+  onParamChange();
+});
 
 // Set plate H so one image tile preserves its native aspect ratio on the
 // shape: H = (per-tile width on the surface) × (imgH / imgW). For
@@ -575,7 +762,8 @@ function readParamsFromUI() {
     display: { ...state.display },
 
     asciiSTL: els.asciiSTL.checked,
-    showClipping: els.showClipping.checked
+    showClipping: els.showClipping.checked,
+    cropPolygon: state.cropPolygon.map((p) => ({ x: p.x, y: p.y }))
   };
 }
 
@@ -612,6 +800,14 @@ function writeParamsToUI(p) {
   if (p.fitMode) els.fitMode.value = p.fitMode;
   if (p.asciiSTL != null) els.asciiSTL.checked = !!p.asciiSTL;
   if (p.showClipping != null) els.showClipping.checked = !!p.showClipping;
+  if (Array.isArray(p.cropPolygon)) {
+    state.cropPolygon = p.cropPolygon
+      .filter((pt) => pt && Number.isFinite(pt.x) && Number.isFinite(pt.y))
+      .slice(0, 4)
+      .map((pt) => ({ x: pt.x, y: pt.y }));
+    state.cropDragIndex = -1;
+    updateCropStatus();
+  }
   if (p.colorCount) {
     state.colorCount = Math.max(1, Math.min(8, p.colorCount | 0));
     els.colorCount.value = String(state.colorCount);
@@ -736,6 +932,11 @@ async function handleFile(file) {
       state.lastStlRenderSize = 0;
     }
     state.sourceFilename = file.name.replace(/\.[^.]+$/, '') || 'input';
+    // A new image has different pixel dimensions (and content), so any old
+    // polygon points are meaningless — reset.
+    state.cropPolygon = [];
+    state.cropDragIndex = -1;
+    updateCropStatus();
     updateStlControlsVisibility();
     applyRotation();
     applyAutoCrop();
@@ -1048,7 +1249,13 @@ function regeneratePreview() {
   // heightmap below, which leaves the margin neutral either way.
   const lowReliefAfter = params.mapDir === 'black' ? 255 : 0;
   const fillColor = lowReliefAfter === 0 ? '#000000' : '#ffffff';
-  const raster = rasterize(state.sourceCanvas, targetW, targetH, params.fitMode, {
+  // If a 4-point polygon is set, mask everything outside it with the
+  // 0-relief fill color before rasterization. The mask happens in source
+  // pixel space so it tiles correctly when tileX/tileY > 1.
+  const sourceForRaster = state.cropPolygon.length === 4
+    ? getMaskedSourceCanvas(state.sourceCanvas, state.cropPolygon, fillColor)
+    : state.sourceCanvas;
+  const raster = rasterize(sourceForRaster, targetW, targetH, params.fitMode, {
     tileX: params.tileX,
     tileY: params.tileY,
     marginPxX: Math.round(params.marginX * pxPerMmX),
@@ -1087,6 +1294,7 @@ function regeneratePreview() {
   }
   state.heightmapMm = heightmapMm;
   state.lastHeightmap = { data: heightmapMm, width: processed.width, height: processed.height };
+  state.lastSurfaceDims = { surfaceW: baseW, surfaceH: baseH };
   state.lastCustomDims = customDims;
   state.lastParamsForMesh = params;
   return true;
@@ -1172,6 +1380,34 @@ function hideWarning() {
   els.warningBox.classList.remove('error');
 }
 
+// FDM extruders top out around 5 points/mm of XY surface detail; anything
+// beyond that just bloats the file without adding visible relief. Resin
+// printers can resolve more, so we only flag this as informational.
+const FDM_PTS_PER_MM_MAX = 5;
+// Confirm before downloading STLs bigger than this — they can lock up
+// slicers and take ages to upload.
+const LARGE_STL_BYTES = 100 * 1024 * 1024;
+
+function getPtsPerMm() {
+  const hm = state.lastHeightmap;
+  const dims = state.lastSurfaceDims;
+  if (!hm || !dims) return null;
+  const { surfaceW, surfaceH } = dims;
+  if (!(surfaceW > 0) || !(surfaceH > 0)) return null;
+  return {
+    horizontal: hm.width / surfaceW,
+    vertical: hm.height / surfaceH
+  };
+}
+
+function formatPtsPerMm(pts) {
+  if (!pts) return '';
+  const fmt = (v) => v.toFixed(v >= 10 ? 0 : 1);
+  const flag = (v) => (v > FDM_PTS_PER_MM_MAX ? ' ⚠ above FDM 5/mm' : '');
+  const worst = Math.max(pts.horizontal, pts.vertical);
+  return `${fmt(pts.horizontal)} × ${fmt(pts.vertical)} pts/mm (H × V)${flag(worst)}`;
+}
+
 function setExportEnabled(on) {
   els.downloadSTL.disabled = !on;
   els.downloadPNG.disabled = !on;
@@ -1179,8 +1415,10 @@ function setExportEnabled(on) {
     const params = readParamsFromUI();
     const tris = state.geometry ? state.geometry.triCount : 0;
     const bytes = estimateBinarySTLBytes(tris);
+    const pts = getPtsPerMm();
+    const ptsStr = pts ? ` · ${formatPtsPerMm(pts)}` : '';
     els.exportHint.textContent =
-      `Filename: ${exportFilename('stl', params)} · ~${formatBytes(bytes)} binary STL`;
+      `Filename: ${exportFilename('stl', params)} · ~${formatBytes(bytes)} binary STL${ptsStr}`;
   } else {
     els.exportHint.textContent = '';
   }
@@ -1242,6 +1480,24 @@ function formatBytes(n) {
 els.downloadSTL.addEventListener('click', () => {
   if (!state.geometry) return;
   const params = readParamsFromUI();
+  const tris = state.geometry.triCount;
+  const estBytes = estimateBinarySTLBytes(tris);
+  const pts = getPtsPerMm();
+
+  if (estBytes > LARGE_STL_BYTES) {
+    const lines = [
+      `This STL is very large: ~${formatBytes(estBytes)} (${formatNum(tris)} triangles).`
+    ];
+    if (pts) {
+      lines.push(
+        `Resolution: ${formatPtsPerMm(pts)}.`,
+        `FDM printing tops out around ${FDM_PTS_PER_MM_MAX} pts/mm — anything higher is wasted on filament. Resin printers can use more.`
+      );
+    }
+    lines.push('', 'Download anyway?');
+    if (!window.confirm(lines.join('\n'))) return;
+  }
+
   const blob = params.asciiSTL
     ? exportSTLAscii(state.geometry.positions, state.geometry.indices, state.sourceFilename || 'relief')
     : exportSTLBinary(state.geometry.positions, state.geometry.indices);
