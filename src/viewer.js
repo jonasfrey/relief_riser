@@ -7,6 +7,11 @@ export class Viewer {
     this._broken = false;
     this._raf = 0;
     this.show = { solid: true, wireframe: false, vertices: false };
+    // Auto-frame the camera only on the next setMesh, then leave the camera
+    // alone so parameter tweaks don't reset the user's orbit. Callers flip
+    // this back on via requestFrame() when a new file is loaded or the shape
+    // mode changes (both can move the bounding box dramatically).
+    this._needsFrame = true;
 
     // Try to create the WebGL context. The browser can refuse if there are
     // already too many active WebGL contexts on the page or if a previous
@@ -181,7 +186,16 @@ export class Viewer {
     this.pointsObj.renderOrder = 2;
     this.scene.add(this.pointsObj);
 
-    this.frame();
+    if (this._needsFrame) {
+      this.frame();
+      this._needsFrame = false;
+    }
+  }
+
+  // Reframe on the NEXT setMesh call. Call after a new file/shape switch so
+  // the camera matches the new bounding box; routine param tweaks skip this.
+  requestFrame() {
+    this._needsFrame = true;
   }
 
   setVisibility(key, visible) {

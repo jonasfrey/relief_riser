@@ -8,7 +8,8 @@ import {
   loadImageFromFile,
   detectContentBBox,
   cropCanvas,
-  subRectCanvas
+  subRectCanvas,
+  stretchCanvas
 } from './imageProcessor.js';
 import { loadSTLFromFile, loadSTLFromUrl } from './stlReader.js';
 import { loadGLBFromFile } from './glbReader.js';
@@ -16,11 +17,13 @@ import { projectSTLToCanvas } from './stlProjector.js';
 import {
   buildReliefGeometry,
   buildCylindricalGeometry,
+  buildEllipseGeometry,
   buildPolygonPrismGeometry,
   buildCustomProfileGeometry,
   buildSTLWrapGeometry,
   estimateTriangleCount,
   estimateCylindricalTriangleCount,
+  estimateEllipseTriangleCount,
   estimatePolygonPrismTriangleCount,
   estimateCustomProfileTriangleCount,
   estimateSTLWrapTriangleCount
@@ -96,6 +99,12 @@ const els = {
   chamferTop: $('chamferTop'),       chamferTopNum: $('chamferTopNum'),
   chamferTopControl: $('chamferTopControl'),
   customProfileControls: $('customProfileControls'),
+  ellipseControls: $('ellipseControls'),
+  ellipseX:          $('ellipseX'),         ellipseXNum:          $('ellipseXNum'),
+  ellipseY:          $('ellipseY'),         ellipseYNum:          $('ellipseYNum'),
+  ellipseThickness:  $('ellipseThickness'), ellipseThicknessNum:  $('ellipseThicknessNum'),
+  ellipseHeight:     $('ellipseHeight'),    ellipseHeightNum:     $('ellipseHeightNum'),
+  ellipseBottomHole: $('ellipseBottomHole'),ellipseBottomHoleNum: $('ellipseBottomHoleNum'),
   stlWrapControls: $('stlWrapControls'),
   wrapStlFile: $('wrapStlFile'),
   wrapStlResetBtn: $('wrapStlResetBtn'),
@@ -126,6 +135,8 @@ const els = {
   rotation: $('rotation'),
   zoomSliderX: $('zoomSliderX'),     zoomSliderXNum: $('zoomSliderXNum'),
   zoomSliderY: $('zoomSliderY'),     zoomSliderYNum: $('zoomSliderYNum'),
+  stretchX:    $('stretchX'),        stretchXNum:    $('stretchXNum'),
+  stretchY:    $('stretchY'),        stretchYNum:    $('stretchYNum'),
   alignX: $('alignX'),
   alignY: $('alignY'),
   cropBadge: $('cropBadge'),
@@ -173,7 +184,14 @@ const sliderPairs = [
   ['gradFrameRight',  'gradFrameRightNum'],
   ['interpWidth',     'interpWidthNum'],
   ['zoomSliderX',     'zoomSliderXNum'],
-  ['zoomSliderY',     'zoomSliderYNum']
+  ['zoomSliderY',     'zoomSliderYNum'],
+  ['stretchX',        'stretchXNum'],
+  ['stretchY',        'stretchYNum'],
+  ['ellipseX',          'ellipseXNum'],
+  ['ellipseY',          'ellipseYNum'],
+  ['ellipseThickness',  'ellipseThicknessNum'],
+  ['ellipseHeight',     'ellipseHeightNum'],
+  ['ellipseBottomHole', 'ellipseBottomHoleNum']
 ];
 
 function linkPair(rangeEl, numEl) {
@@ -257,6 +275,7 @@ els.autoStretch.addEventListener('click', () => {
 els.shape.addEventListener('change', () => {
   state.shape = els.shape.value;
   updateShapeLabels();
+  viewer.requestFrame();
   if (state.shape === 'customProfile' && !state.profilePoints) {
     loadDefaultProfile();   // fire-and-forget; pipeline re-runs when it lands
   }
@@ -279,6 +298,7 @@ els.profileFile.addEventListener('change', async (e) => {
     setProfileStatus(`Loaded ${file.name} — ${points.length} points`);
     updateBandModeLabel();
     drawProfilePreview();
+    viewer.requestFrame();
     triggerProcessing(true);
   } catch (err) {
     setProfileStatus(`Error: ${err.message}`, true);
@@ -298,6 +318,7 @@ els.wrapStlFile.addEventListener('change', async (e) => {
     state.wrapStlInfo = computeWrapStlInfo(mesh);
     setWrapStlStatus(formatWrapStlInfo(file.name, state.wrapStlInfo));
     applyDerivedDims();
+    viewer.requestFrame();
     triggerProcessing(true);
   } catch (err) {
     setWrapStlStatus(`Error: ${err.message}`, true);
@@ -316,6 +337,7 @@ async function loadDefaultWrapStl() {
     state.wrapStlInfo = computeWrapStlInfo(mesh);
     setWrapStlStatus(formatWrapStlInfo(state.wrapStlFilename, state.wrapStlInfo));
     applyDerivedDims();
+    viewer.requestFrame();
     triggerProcessing(true);
   } catch (err) {
     setWrapStlStatus(`Could not load default STL: ${err.message}`, true);
@@ -367,6 +389,7 @@ async function loadDefaultProfile() {
     setProfileStatus(`Default profile — ${points.length} points`);
     updateBandModeLabel();
     drawProfilePreview();
+    viewer.requestFrame();
     triggerProcessing(true);
   } catch (err) {
     setProfileStatus(`Could not load default profile: ${err.message}`, true);
@@ -891,6 +914,7 @@ function updateShapeLabels() {
   const isCyl  = state.shape === 'cylindrical';
   const isCustom = state.shape === 'customProfile';
   const isStlWrap = state.shape === 'stlWrap';
+  const isEllipse = state.shape === 'ellipse';
   if (isCyl) {
     els.plateWLabel.textContent = 'Radius R (mm)';
   } else if (isPoly) {
@@ -903,18 +927,19 @@ function updateShapeLabels() {
   els.chamferTopControl.classList.toggle('hidden', !isPoly);
   els.customProfileControls.classList.toggle('hidden', !isCustom);
   if (els.stlWrapControls) els.stlWrapControls.classList.toggle('hidden', !isStlWrap);
-  // Custom-profile and STL-wrap modes both define the wrap geometry from
-  // their loaded file, so the plain plate W slider is irrelevant. The H
-  // control is permanently hidden — H is always derived. baseThickness is
-  // hidden only for custom profile (which doesn't use it); STL wrap still
-  // does (it controls the inner-shell offset).
+  if (els.ellipseControls) els.ellipseControls.classList.toggle('hidden', !isEllipse);
+  // Custom-profile, STL-wrap, and ellipse modes all own their own dimensional
+  // controls, so the plain plate W slider is irrelevant. The H control is
+  // permanently hidden — H is always derived. baseThickness is hidden for
+  // custom profile (not used) and ellipse (replaced by its own thickness
+  // slider); STL wrap and cylindrical still use it.
   const plateCtl = els.plateW.closest('.control');
   const plateHCtl = els.plateH.closest('.control');
   const baseCtl = els.baseThickness.closest('.control');
-  if (plateCtl)  plateCtl.classList.toggle('hidden', isCustom || isStlWrap);
+  if (plateCtl)  plateCtl.classList.toggle('hidden', isCustom || isStlWrap || isEllipse);
   if (plateHCtl) plateHCtl.classList.add('hidden');
-  if (baseCtl)   baseCtl.classList.toggle('hidden', isCustom);
-  if (els.derivedDimsHint) els.derivedDimsHint.classList.toggle('hidden', isCustom || isStlWrap);
+  if (baseCtl)   baseCtl.classList.toggle('hidden', isCustom || isEllipse);
+  if (els.derivedDimsHint) els.derivedDimsHint.classList.toggle('hidden', isCustom || isStlWrap || isEllipse);
 }
 
 function updateResolutionVisibility() {
@@ -1204,6 +1229,15 @@ els.cropPolyClear.addEventListener('click', () => {
   onParamChange();
 });
 
+// Ramanujan's second approximation. Used for the rasterizer's unrolled
+// width and the hint text. The mesh builder integrates arc length directly
+// for its parameterization — this is just for sizing.
+function ellipseCircumference(a, b) {
+  if (!(a > 0) || !(b > 0)) return 0;
+  const h = ((a - b) / (a + b)) ** 2;
+  return Math.PI * (a + b) * (1 + (3 * h) / (10 + Math.sqrt(4 - 3 * h)));
+}
+
 // Single-knob sizing: only W is user-editable. H is derived so that each
 // stamped image tile preserves its native aspect ratio on the chosen shape.
 // Per-tile match: (tileWmm) / (tileHmm) = imgW / imgH.
@@ -1235,6 +1269,16 @@ function computeDerivedDims() {
     const actualPlateW = circumference / tileX;
     const plateH = actualPlateW * (imgH / imgW) * tileY;
     return { actualPlateW, plateH, radius, diameter, circumference, tileX, tileY };
+  }
+
+  if (state.shape === 'ellipse') {
+    const xSize = parseFloat(els.ellipseX.value);
+    const ySize = parseFloat(els.ellipseY.value);
+    const height = parseFloat(els.ellipseHeight.value);
+    if (!(xSize > 0) || !(ySize > 0) || !(height > 0)) return null;
+    const circumference = ellipseCircumference(xSize / 2, ySize / 2);
+    const actualPlateW = circumference / tileX;
+    return { actualPlateW, plateH: height, circumference, xSize, ySize, tileX, tileY };
   }
 
   if (state.shape === 'stlWrap') {
@@ -1294,6 +1338,9 @@ function applyDerivedDims() {
       : '';
     els.derivedDimsHint.textContent =
       `→ max-R ${fmt(dims.maxR)} mm · height ${fmt(dims.plateH)} mm · per-tile arc ${fmt(dims.actualPlateW)} mm${tilePart}`;
+  } else if (state.shape === 'ellipse') {
+    // The ellipse panel already shows X/Y/height literally, so the regular
+    // derived-dims hint is hidden in this mode (see updateShapeLabels).
   } else {
     els.derivedDimsHint.textContent = `→ height ${fmt(dims.plateH)} mm`;
   }
@@ -1361,10 +1408,17 @@ function readParamsFromUI() {
     radiusFactor: parseFloat(els.radiusFactor.value) || 1,
     heightFactor: parseFloat(els.heightFactor.value) || 1,
     outerBandFrac: parseFloat(els.outerBandFrac.value) || 50,
+    ellipseX:          parseFloat(els.ellipseX.value)          || 40,
+    ellipseY:          parseFloat(els.ellipseY.value)          || 25,
+    ellipseThickness:  parseFloat(els.ellipseThickness.value)  || 1.5,
+    ellipseHeight:     parseFloat(els.ellipseHeight.value)     || 40,
+    ellipseBottomHole: parseFloat(els.ellipseBottomHole.value) || 0,
     autoCrop: state.autoCrop,
     rotation: state.rotation,
     zoomX: parseFloat(els.zoomSliderX.value) / 100 || 1,
     zoomY: parseFloat(els.zoomSliderY.value) / 100 || 1,
+    stretchX: parseFloat(els.stretchX.value) || 1,
+    stretchY: parseFloat(els.stretchY.value) || 1,
     alignX: els.alignX.value,
     alignY: els.alignY.value,
     stlSide: state.stlSide,
@@ -1397,6 +1451,11 @@ function writeParamsToUI(p) {
   setNum('radiusFactor', 'radiusFactorNum', p.radiusFactor);
   setNum('heightFactor', 'heightFactorNum', p.heightFactor);
   setNum('outerBandFrac', 'outerBandFracNum', p.outerBandFrac);
+  setNum('ellipseX',          'ellipseXNum',          p.ellipseX);
+  setNum('ellipseY',          'ellipseYNum',          p.ellipseY);
+  setNum('ellipseThickness',  'ellipseThicknessNum',  p.ellipseThickness);
+  setNum('ellipseHeight',     'ellipseHeightNum',     p.ellipseHeight);
+  setNum('ellipseBottomHole', 'ellipseBottomHoleNum', p.ellipseBottomHole);
   setNum('stlRenderSize', 'stlRenderSizeNum', p.stlRenderSize);
   setNum('tileX', 'tileXNum', p.uiTileX != null ? p.uiTileX : p.tileX);
   setNum('tileY', 'tileYNum', p.tileY);
@@ -1435,7 +1494,7 @@ function writeParamsToUI(p) {
     state.layerHeights = p.layerHeights.slice();
     while (state.layerHeights.length < state.colorCount) state.layerHeights.push(0);
   }
-  if (p.shape === 'rectangular' || p.shape === 'cylindrical' || p.shape === 'polygon' || p.shape === 'customProfile' || p.shape === 'stlWrap') {
+  if (p.shape === 'rectangular' || p.shape === 'cylindrical' || p.shape === 'polygon' || p.shape === 'customProfile' || p.shape === 'stlWrap' || p.shape === 'ellipse') {
     state.shape = p.shape;
     els.shape.value = p.shape;
   }
@@ -1477,6 +1536,8 @@ function writeParamsToUI(p) {
   };
   setPct(els.zoomSliderX, els.zoomSliderXNum, fX);
   setPct(els.zoomSliderY, els.zoomSliderYNum, fY);
+  setNum('stretchX', 'stretchXNum', p.stretchX);
+  setNum('stretchY', 'stretchYNum', p.stretchY);
   els.alignX.value = (p.alignX === 'left' || p.alignX === 'center' || p.alignX === 'right')
     ? p.alignX
     : alignFromOffset(p.zoomOffsetX, fX, 'left', 'right');
@@ -1599,6 +1660,7 @@ async function handleFile(file) {
     applyAutoCrop();
     applyDerivedDims();
     setExportEnabled(false);
+    viewer.requestFrame();
     triggerProcessing(true);
   } catch (err) {
     showWarning('Could not load file: ' + err.message, true);
@@ -1765,7 +1827,7 @@ function getTargetDims(params) {
     // aspect (circumference/tileX) / bandLength.
     w = dims.circumference;
     h = dims.bandLength;
-  } else if (params.shape === 'cylindrical' || params.shape === 'stlWrap') {
+  } else if (params.shape === 'cylindrical' || params.shape === 'stlWrap' || params.shape === 'ellipse') {
     w = params.plateW * params.tileX;
     h = params.plateH;
   } else {
@@ -1814,6 +1876,7 @@ function customProfileDims(params) {
 function estimateTrisForShape(targetW, targetH, shape, sides, hasChamfer, profileLen) {
   if (shape === 'cylindrical') return estimateCylindricalTriangleCount(targetW, targetH);
   if (shape === 'stlWrap') return estimateSTLWrapTriangleCount(targetW, targetH);
+  if (shape === 'ellipse') return estimateEllipseTriangleCount(targetW, targetH);
   if (shape === 'polygon') return estimatePolygonPrismTriangleCount(sides, targetW, targetH, hasChamfer);
   if (shape === 'customProfile') {
     // After splicing the outer band (length Ny) into the profile (originally
@@ -1897,7 +1960,7 @@ function regeneratePreview() {
     // rasterizer stamps tileX copies inside that single-rev canvas.
     baseW = customDims.circumference;
     baseH = customDims.bandLength;
-  } else if (params.shape === 'cylindrical') {
+  } else if (params.shape === 'cylindrical' || params.shape === 'ellipse') {
     baseW = params.plateW * params.tileX;
     baseH = params.plateH;
   } else if (params.shape === 'stlWrap') {
@@ -1936,9 +1999,12 @@ function regeneratePreview() {
   const zoomedForRaster = (crop.fX < 1 || crop.fY < 1)
     ? subRectCanvas(sourceForRaster, crop.fX, crop.fY, crop.oxFrac, crop.oyFrac)
     : sourceForRaster;
+  const stretchedForRaster = (params.stretchX !== 1 || params.stretchY !== 1)
+    ? stretchCanvas(zoomedForRaster, params.stretchX, params.stretchY)
+    : zoomedForRaster;
   const marginPxX = Math.round(params.marginX * pxPerMmX);
   const marginPxY = Math.round(params.marginY * pxPerMmY);
-  const raster = rasterize(zoomedForRaster, targetW, targetH, params.fitMode, {
+  const raster = rasterize(stretchedForRaster, targetW, targetH, params.fitMode, {
     tileX: params.tileX,
     tileY: params.tileY,
     marginPxX,
@@ -2033,6 +2099,14 @@ function regenerateMesh() {
         stl: state.wrapStl,
         baseThickness: params.baseThickness,
         closedBottom: params.closedBottom
+      });
+    } else if (params.shape === 'ellipse') {
+      geom = buildEllipseGeometry(heightmap, {
+        xSize: params.ellipseX,
+        ySize: params.ellipseY,
+        thickness: params.ellipseThickness,
+        height: params.ellipseHeight,
+        bottomHolePct: params.ellipseBottomHole
       });
     } else if (params.shape === 'customProfile') {
       // Resample the outer band to exactly Ny points (one per heightmap row),
@@ -2167,6 +2241,12 @@ function exportFilename(ext, params) {
       ? state.wrapStlFilename.replace(/\.[^.]+$/, '').replace(/[^A-Za-z0-9_-]+/g, '_')
       : 'wrap';
     return `${name}_on_${wrapTag}_h${f}mm${c}.${ext}`;
+  }
+  if (params.shape === 'ellipse') {
+    const ex = stripTrailing(params.ellipseX);
+    const ey = stripTrailing(params.ellipseY);
+    const eh = stripTrailing(params.ellipseHeight);
+    return `${name}_ellipse_${ex}x${ey}xH${eh}_h${f}mm${c}.${ext}`;
   }
   return `${name}_${W}x${H}_h${f}mm${c}.${ext}`;
 }

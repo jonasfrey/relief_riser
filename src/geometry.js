@@ -24,6 +24,13 @@ export function estimateSTLWrapTriangleCount(Nx, Ny) {
   return 4 * Nx * Ny;
 }
 
+export function estimateEllipseTriangleCount(Nx, Ny) {
+  // outer + inner shells: 4·Nx·(Ny−1); top cap (annular): 2·Nx; bottom: up to
+  // 6·Nx when a partial hole adds side walls + inner floor. Use the upper
+  // bound so the auto/hard limits don't underestimate.
+  return 4 * Nx * (Ny - 1) + 8 * Nx;
+}
+
 export function estimatePolygonPrismTriangleCount(N, NxPerFace, Ny, hasChamfer) {
   // With shared outer corners the outer is also a single closed ring. Both
   // inner and outer rings have NxRing = N·(Nx−1) vertices around. Surface =
@@ -1105,5 +1112,246 @@ export function buildSTLWrapGeometry(heightmap, opts) {
     Ny,
     stlHeight: H,
     stlMaxR: globalMax
+  };
+}
+
+// Build a thick-walled elliptical tube. Outer perimeter is an ellipse of
+// half-axes (a, b) = (xSize/2, ySize/2); inner perimeter is (a−B, b−B).
+// Heightmap pixels push their outer vertex further from the origin along
+// the polar radial direction. Pixel column 0 → θ=0 (+X), columns wrap CCW.
+// Image rows go top→bottom and map to Z=H → Z=0 (like the cylinder).
+//
+// Bottom hole: a smaller similar ellipse with axes (a_in·p, b_in·p) where
+// p = bottomHolePct/100. p=0 gives a closed floor (solid disc at z=0 plus a
+// sealed inner-floor disc at z=B). p=100 gives a fully open bottom (annular
+// outer→inner ring at z=0). Intermediate p creates an actual hole: annular
+// outer→hole at z=0, vertical hole walls from z=0 to z=B, annular hole→inner
+// floor at z=B sealing the cavity around the hole.
+//
+// Columns are spaced by arc length, not angle, so the image wraps the
+// perimeter at uniform stretch even when xSize ≠ ySize.
+export function buildEllipseGeometry(heightmap, opts) {
+  const Nx = heightmap.width;
+  const Ny = heightmap.height;
+  if (Nx < 3 || Ny < 2) {
+    throw new Error('Ellipse mesh requires Nx >= 3 and Ny >= 2');
+  }
+  const xSize = opts.xSize;
+  const ySize = opts.ySize;
+  const B = opts.thickness;
+  const H = opts.height;
+  const holePct = Math.max(0, Math.min(100, opts.bottomHolePct || 0));
+  const a = xSize / 2;
+  const b = ySize / 2;
+  const aIn = a - B;
+  const bIn = b - B;
+  if (!(aIn > 0) || !(bIn > 0)) {
+    throw new Error(`Outside thickness (${B}) must be smaller than both X/2 (${a}) and Y/2 (${b})`);
+  }
+  if (B >= H) {
+    throw new Error('Outside thickness must be smaller than extrusion height');
+  }
+
+  // Arc-length parameterization: integrate |dP/dθ| = √(a²sin²θ + b²cos²θ)
+  // around the perimeter, then invert to find the θ at each evenly-spaced
+  // arc-length step. 4096 samples gives sub-mm error at typical sizes.
+  const STEPS = 4096;
+  const arcLens = new Float32Array(STEPS + 1);
+  let total = 0;
+  for (let k = 1; k <= STEPS; k++) {
+    const tMid = ((k - 0.5) / STEPS) * 2 * Math.PI;
+    const ds = Math.hypot(a * Math.sin(tMid), b * Math.cos(tMid)) * (2 * Math.PI / STEPS);
+    total += ds;
+    arcLens[k] = total;
+  }
+  const circumference = total;
+
+  const cosT = new Float32Array(Nx);
+  const sinT = new Float32Array(Nx);
+  for (let i = 0; i < Nx; i++) {
+    const target = (i / Nx) * circumference;
+    let lo = 1, hi = STEPS;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (arcLens[mid] < target) lo = mid + 1; else hi = mid;
+    }
+    const k = lo;
+    const span = arcLens[k] - arcLens[k - 1];
+    const f = span > 0 ? (target - arcLens[k - 1]) / span : 0;
+    const theta = ((k - 1 + f) / STEPS) * 2 * Math.PI;
+    cosT[i] = Math.cos(theta);
+    sinT[i] = Math.sin(theta);
+  }
+
+  const hasHole = holePct > 0;
+  const fullHole = holePct >= 99.999;
+  const holeAx = aIn * (holePct / 100);
+  const holeBx = bIn * (holePct / 100);
+  // Inner-surface Z range: when the bottom is fully open the inner cavity
+  // continues all the way down to z=0 (no floor); otherwise it stops at z=B
+  // where the floor (or hole floor annulus) seals it.
+  const innerZBottom = fullHole ? 0 : B;
+
+  let extraVerts = 0;
+  if (!hasHole) extraVerts += 2;             // disc center + floor center
+  else if (!fullHole) extraVerts += 2 * Nx;  // hole ring at z=0 and z=B
+
+  const totalVerts = 2 * Nx * Ny + extraVerts;
+  const positions = new Float32Array(totalVerts * 3);
+  const innerOffset = Nx * Ny;
+
+  // Outer surface — relief pushes the vertex away from the origin along the
+  // polar radial direction so |new| = |orig| + h.
+  for (let j = 0; j < Ny; j++) {
+    const z = H - (j / (Ny - 1)) * H;
+    for (let i = 0; i < Nx; i++) {
+      const cx = a * cosT[i];
+      const cy = b * sinT[i];
+      const r = Math.hypot(cx, cy);
+      const h = heightmap.data[i + j * Nx];
+      const scale = r > 1e-12 ? (r + h) / r : 1;
+      const vi = (i + j * Nx) * 3;
+      positions[vi]     = cx * scale;
+      positions[vi + 1] = cy * scale;
+      positions[vi + 2] = z;
+    }
+  }
+  // Inner surface (smooth, no relief).
+  for (let j = 0; j < Ny; j++) {
+    const z = H - (j / (Ny - 1)) * (H - innerZBottom);
+    for (let i = 0; i < Nx; i++) {
+      const vi = (innerOffset + i + j * Nx) * 3;
+      positions[vi]     = aIn * cosT[i];
+      positions[vi + 1] = bIn * sinT[i];
+      positions[vi + 2] = z;
+    }
+  }
+
+  let bottomCenter = -1, floorCenter = -1;
+  let holeBotOff = -1, holeTopOff = -1;
+  const centerBase = 2 * Nx * Ny;
+  if (!hasHole) {
+    bottomCenter = centerBase;
+    floorCenter = centerBase + 1;
+    positions[bottomCenter * 3]     = 0;
+    positions[bottomCenter * 3 + 1] = 0;
+    positions[bottomCenter * 3 + 2] = 0;
+    positions[floorCenter * 3]      = 0;
+    positions[floorCenter * 3 + 1]  = 0;
+    positions[floorCenter * 3 + 2]  = B;
+  } else if (!fullHole) {
+    holeBotOff = centerBase;
+    holeTopOff = centerBase + Nx;
+    for (let i = 0; i < Nx; i++) {
+      const vi = (holeBotOff + i) * 3;
+      positions[vi]     = holeAx * cosT[i];
+      positions[vi + 1] = holeBx * sinT[i];
+      positions[vi + 2] = 0;
+    }
+    for (let i = 0; i < Nx; i++) {
+      const vi = (holeTopOff + i) * 3;
+      positions[vi]     = holeAx * cosT[i];
+      positions[vi + 1] = holeBx * sinT[i];
+      positions[vi + 2] = B;
+    }
+  }
+
+  let triCount = 4 * Nx * (Ny - 1) + 2 * Nx; // outer + inner shells + top cap
+  if (!hasHole) triCount += 2 * Nx;          // disc + sealed floor
+  else if (fullHole) triCount += 2 * Nx;     // annular outer→inner at z=0
+  else triCount += 6 * Nx;                   // outer→hole + hole walls + hole→inner
+
+  const indices = new Uint32Array(triCount * 3);
+  let p = 0;
+  const wrap = (i) => (i === Nx ? 0 : i);
+  const outer = (i, j) => wrap(i) + j * Nx;
+  const inner = (i, j) => innerOffset + wrap(i) + j * Nx;
+  const holeB = (i) => holeBotOff + wrap(i);
+  const holeT = (i) => holeTopOff + wrap(i);
+
+  // Outer surface — same winding as the cylinder's outer ring (outward
+  // radial normals; j=0 at top, i CCW from +X).
+  for (let j = 0; j < Ny - 1; j++) {
+    for (let i = 0; i < Nx; i++) {
+      const A = outer(i, j),     B_ = outer(i + 1, j);
+      const C = outer(i + 1, j + 1), D = outer(i, j + 1);
+      indices[p++] = A; indices[p++] = D; indices[p++] = C;
+      indices[p++] = A; indices[p++] = C; indices[p++] = B_;
+    }
+  }
+  // Inner surface — inward radial normals (reverse winding).
+  for (let j = 0; j < Ny - 1; j++) {
+    for (let i = 0; i < Nx; i++) {
+      const A = inner(i, j),     B_ = inner(i + 1, j);
+      const C = inner(i + 1, j + 1), D = inner(i, j + 1);
+      indices[p++] = A; indices[p++] = C; indices[p++] = D;
+      indices[p++] = A; indices[p++] = B_; indices[p++] = C;
+    }
+  }
+  // Top cap (annular outer→inner at z=H, normal +Z).
+  for (let i = 0; i < Nx; i++) {
+    const A = outer(i, 0),     B_ = outer(i + 1, 0);
+    const C = inner(i + 1, 0), D = inner(i, 0);
+    indices[p++] = A; indices[p++] = B_; indices[p++] = C;
+    indices[p++] = A; indices[p++] = C;  indices[p++] = D;
+  }
+
+  if (!hasHole) {
+    // Solid disc at z=0 (normal −Z) and sealed inner-floor disc at z=B
+    // (normal +Z), matching the closed cylinder topology.
+    for (let i = 0; i < Nx; i++) {
+      const A = outer(i,     Ny - 1);
+      const B_ = outer(i + 1, Ny - 1);
+      indices[p++] = bottomCenter; indices[p++] = B_; indices[p++] = A;
+    }
+    for (let i = 0; i < Nx; i++) {
+      const i0 = inner(i,     Ny - 1);
+      const i1 = inner(i + 1, Ny - 1);
+      indices[p++] = floorCenter; indices[p++] = i0; indices[p++] = i1;
+    }
+  } else if (fullHole) {
+    // Hole = inner cavity, so the bottom is an annular ring from outer to
+    // inner at z=0 (normal −Z, reverse winding vs. top cap).
+    for (let i = 0; i < Nx; i++) {
+      const A = outer(i, Ny - 1),     B_ = outer(i + 1, Ny - 1);
+      const C = inner(i + 1, Ny - 1), D = inner(i, Ny - 1);
+      indices[p++] = A; indices[p++] = C; indices[p++] = B_;
+      indices[p++] = A; indices[p++] = D; indices[p++] = C;
+    }
+  } else {
+    // Bottom annular ring outer→hole at z=0 (normal −Z).
+    for (let i = 0; i < Nx; i++) {
+      const A = outer(i, Ny - 1),     B_ = outer(i + 1, Ny - 1);
+      const C = holeB(i + 1),          D = holeB(i);
+      indices[p++] = A; indices[p++] = C; indices[p++] = B_;
+      indices[p++] = A; indices[p++] = D; indices[p++] = C;
+    }
+    // Hole side wall from z=0 (holeB) up to z=B (holeT). Wall material is
+    // outside the hole, so the surface normal points inward (toward origin),
+    // away from the wall material into the hole void.
+    for (let i = 0; i < Nx; i++) {
+      const A = holeB(i),     B_ = holeB(i + 1);
+      const C = holeT(i + 1), D = holeT(i);
+      indices[p++] = A; indices[p++] = D; indices[p++] = C;
+      indices[p++] = A; indices[p++] = C; indices[p++] = B_;
+    }
+    // Inner-floor annular ring hole→inner at z=B (normal +Z), sealing the
+    // cavity around the hole.
+    for (let i = 0; i < Nx; i++) {
+      const A = holeT(i),         B_ = holeT(i + 1);
+      const C = inner(i + 1, Ny - 1), D = inner(i, Ny - 1);
+      indices[p++] = A; indices[p++] = C; indices[p++] = B_;
+      indices[p++] = A; indices[p++] = D; indices[p++] = C;
+    }
+  }
+
+  return {
+    positions,
+    indices,
+    triCount,
+    vertCount: totalVerts,
+    Nx,
+    Ny,
+    circumference
   };
 }

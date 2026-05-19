@@ -66,6 +66,23 @@ export function subRectCanvas(sourceCanvas, fractionX, fractionY, offsetXFrac, o
   return out;
 }
 
+// Non-uniformly resize a canvas. Used for the per-axis image stretch — the
+// scaled canvas then flows through the regular fit/stretch rasterizer, so a
+// 1.5× X-stretch on a 1:1 source effectively gives a 1.5:1 aspect when fit
+// onto the target shape.
+export function stretchCanvas(sourceCanvas, sx, sy) {
+  const fx = Math.max(0.25, Math.min(4, sx || 1));
+  const fy = Math.max(0.25, Math.min(4, sy || 1));
+  if (Math.abs(fx - 1) < 1e-3 && Math.abs(fy - 1) < 1e-3) return sourceCanvas;
+  const w = Math.max(2, Math.round(sourceCanvas.width * fx));
+  const h = Math.max(2, Math.round(sourceCanvas.height * fy));
+  const out = document.createElement('canvas');
+  out.width = w;
+  out.height = h;
+  out.getContext('2d').drawImage(sourceCanvas, 0, 0, w, h);
+  return out;
+}
+
 export function rasterize(sourceCanvas, targetW, targetH, fitMode, opts = {}) {
   const tileX = Math.max(1, opts.tileX | 0 || 1);
   const tileY = Math.max(1, opts.tileY | 0 || 1);

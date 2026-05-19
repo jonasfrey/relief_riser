@@ -87,6 +87,17 @@
             </select>
           </div>
           <p class="hint">Sliders pick how much of each axis to keep; dropdowns snap that window left/center/right and top/center/bottom. The orange rectangle on the source preview shows the resulting crop.</p>
+          <div class="control">
+            <label for="stretchX">Stretch X (×)</label>
+            <input type="range" id="stretchX" min="1" max="2" step="0.01" value="1" />
+            <input type="number" id="stretchXNum" min="1" max="2" step="0.01" value="1" />
+          </div>
+          <div class="control">
+            <label for="stretchY">Stretch Y (×)</label>
+            <input type="range" id="stretchY" min="1" max="2" step="0.01" value="1" />
+            <input type="number" id="stretchYNum" min="1" max="2" step="0.01" value="1" />
+          </div>
+          <p class="hint">Non-uniform stretch applied to the image before it's fit onto the shape. Keep below 2× — the relief loses detail along the stretched axis.</p>
           <div class="preview-pair">
             <div>
               <h3>Source <span id="cropBadge" class="badge hidden">cropped</span></h3>
@@ -288,6 +299,7 @@
             <select id="shape">
               <option value="rectangular" selected>Rectangular plate</option>
               <option value="cylindrical">Cylindrical (image wraps around)</option>
+              <option value="ellipse">Ellipse (image wraps around outer face)</option>
               <option value="polygon">Polygon prism (same image on each side)</option>
               <option value="customProfile">Custom profile (revolved DXF)</option>
               <option value="stlWrap">Custom STL wrap (relief on outer surface)</option>
@@ -313,6 +325,35 @@
               </label>
             </div>
             <p class="hint">The image wraps around the STL's outer surface using cylindrical projection along its Z axis. The STL should enclose its Z axis (e.g. a vase shape — centered on its own XY bounding box). The W slider is ignored: circumference and height come from the STL bounding box. With auto-fit on, "Repeat X" is derived so tiles preserve the image aspect ratio while staying integer (= seamless around the circumference); only "Repeat Y" remains user-controlled.</p>
+          </div>
+
+          <div class="hidden" id="ellipseControls">
+            <div class="control">
+              <label for="ellipseX">X size (mm)</label>
+              <input type="range" id="ellipseX" min="5" max="300" step="0.5" value="40" />
+              <input type="number" id="ellipseXNum" min="5" max="300" step="0.5" value="40" />
+            </div>
+            <div class="control">
+              <label for="ellipseY">Y size (mm)</label>
+              <input type="range" id="ellipseY" min="5" max="300" step="0.5" value="25" />
+              <input type="number" id="ellipseYNum" min="5" max="300" step="0.5" value="25" />
+            </div>
+            <div class="control">
+              <label for="ellipseThickness">Outside thickness (mm)</label>
+              <input type="range" id="ellipseThickness" min="0.4" max="20" step="0.1" value="1.5" />
+              <input type="number" id="ellipseThicknessNum" min="0.4" max="20" step="0.1" value="1.5" />
+            </div>
+            <div class="control">
+              <label for="ellipseHeight">Extrusion height (mm)</label>
+              <input type="range" id="ellipseHeight" min="1" max="300" step="0.5" value="40" />
+              <input type="number" id="ellipseHeightNum" min="1" max="300" step="0.5" value="40" />
+            </div>
+            <div class="control">
+              <label for="ellipseBottomHole">Bottom hole size (%)</label>
+              <input type="range" id="ellipseBottomHole" min="0" max="100" step="1" value="0" />
+              <input type="number" id="ellipseBottomHoleNum" min="0" max="100" step="1" value="0" />
+            </div>
+            <p class="hint">An elliptical tube of outer X × Y, wall thickness on the inside, extruded along Z. The image wraps once around the outer face; each greyscale pixel pushes its outer vertex further from the center. Bottom hole scales the cavity opening at the base (0% = closed, 100% = fully open).</p>
           </div>
 
           <div class="hidden" id="customProfileControls">
