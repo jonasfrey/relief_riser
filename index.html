@@ -353,7 +353,7 @@
               <input type="range" id="ellipseBottomHole" min="0" max="100" step="1" value="0" />
               <input type="number" id="ellipseBottomHoleNum" min="0" max="100" step="1" value="0" />
             </div>
-            <p class="hint">An elliptical tube of outer X × Y, wall thickness on the inside, extruded along Z. The image wraps once around the outer face; each greyscale pixel pushes its outer vertex further from the center. Bottom hole scales the cavity opening at the base (0% = closed, 100% = fully open).</p>
+            <p class="hint">X and Y define the inner cavity dimensions. Wall thickness grows outward, so the outer ellipse = inner + thickness. The image wraps once around the outer face; each greyscale pixel pushes its outer vertex further from the center. Bottom hole is a percentage of the inner X/Y (50% = hole is half the inner size, 100% = fully open).</p>
           </div>
 
           <div class="hidden" id="customProfileControls">

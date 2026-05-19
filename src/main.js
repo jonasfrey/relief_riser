@@ -1275,8 +1275,9 @@ function computeDerivedDims() {
     const xSize = parseFloat(els.ellipseX.value);
     const ySize = parseFloat(els.ellipseY.value);
     const height = parseFloat(els.ellipseHeight.value);
+    const thickness = parseFloat(els.ellipseThickness.value) || 0;
     if (!(xSize > 0) || !(ySize > 0) || !(height > 0)) return null;
-    const circumference = ellipseCircumference(xSize / 2, ySize / 2);
+    const circumference = ellipseCircumference(xSize / 2 + thickness, ySize / 2 + thickness);
     const actualPlateW = circumference / tileX;
     return { actualPlateW, plateH: height, circumference, xSize, ySize, tileX, tileY };
   }

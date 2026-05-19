@@ -1115,13 +1115,14 @@ export function buildSTLWrapGeometry(heightmap, opts) {
   };
 }
 
-// Build a thick-walled elliptical tube. Outer perimeter is an ellipse of
-// half-axes (a, b) = (xSize/2, ySize/2); inner perimeter is (a−B, b−B).
+// Build a thick-walled elliptical tube. xSize/ySize define the INNER cavity
+// dimensions; the outer perimeter is inner + thickness on each side, so
+// half-axes: aIn = xSize/2, bIn = ySize/2, a = aIn+B, b = bIn+B.
 // Heightmap pixels push their outer vertex further from the origin along
 // the polar radial direction. Pixel column 0 → θ=0 (+X), columns wrap CCW.
 // Image rows go top→bottom and map to Z=H → Z=0 (like the cylinder).
 //
-// Bottom hole: a smaller similar ellipse with axes (a_in·p, b_in·p) where
+// Bottom hole: a smaller similar ellipse with axes (aIn·p, bIn·p) where
 // p = bottomHolePct/100. p=0 gives a closed floor (solid disc at z=0 plus a
 // sealed inner-floor disc at z=B). p=100 gives a fully open bottom (annular
 // outer→inner ring at z=0). Intermediate p creates an actual hole: annular
@@ -1141,12 +1142,12 @@ export function buildEllipseGeometry(heightmap, opts) {
   const B = opts.thickness;
   const H = opts.height;
   const holePct = Math.max(0, Math.min(100, opts.bottomHolePct || 0));
-  const a = xSize / 2;
-  const b = ySize / 2;
-  const aIn = a - B;
-  const bIn = b - B;
-  if (!(aIn > 0) || !(bIn > 0)) {
-    throw new Error(`Outside thickness (${B}) must be smaller than both X/2 (${a}) and Y/2 (${b})`);
+  const aIn = xSize / 2;   // inner cavity half-axes (user's x/y)
+  const bIn = ySize / 2;
+  const a = aIn + B;        // outer half-axes = inner + wall thickness
+  const b = bIn + B;
+  if (!(B > 0)) {
+    throw new Error('Outside thickness must be positive');
   }
   if (B >= H) {
     throw new Error('Outside thickness must be smaller than extrusion height');
