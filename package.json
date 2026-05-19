@@ -5,6 +5,7 @@
   "description": "Convert 2D images into 3D relief plates for FDM printing. Fully client-side.",
   "type": "module",
   "scripts": {
+    "start": "[ -d node_modules ] || npm install && vite",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview"
