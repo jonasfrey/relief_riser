@@ -1,0 +1,2 @@
+the Shape - Custom STL wrap is not working as i expect it. 
+the loaded stl will be a eliptical object. i would like to have the 'outer' verticies to be pushed out more depending on the greyscale image. currently it looks not bad. but when i change the base thickness , it seems that the inner verticies also get manipulated . at least visually i can see that the inside of the hollow elipsoid object is now smaller than the original object. i would like to only manipulate the outer verticies. i can imagine it is now the challange of finding out what counts as a 'outer' vertex.

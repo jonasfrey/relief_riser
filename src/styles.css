@@ -183,6 +183,31 @@ details.panel:not([open]) > summary::before {
   margin-top: 0.6rem;
 }
 
+/* Keep the depth-map preview visible while scrolling through the rest of the
+   column's controls. Sticks to the top of its scrolling ancestor (.col),
+   which contains every panel in this column. */
+.preview-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+
+.preview-sticky .preview-large {
+  margin-top: 0;
+}
+
+.preview-sticky .img-preview-large {
+  /* The sticky panel shouldn't dominate the viewport — shrink the heightmap
+     canvas so the controls below remain easily reachable. The aspect ratio is
+     preserved by `object-fit: contain` on .img-preview. */
+  min-height: 0;
+  max-height: 32vh;
+}
+
+.preview-sticky .histogram {
+  height: 56px;
+}
+
 .preview-large h3 {
   margin-bottom: 0.3rem;
 }
@@ -364,6 +389,35 @@ select:focus {
 }
 
 .warning.error { color: var(--error); border-color: var(--error); background: rgba(255, 107, 107, 0.18); }
+
+.profile-preview {
+  display: block;
+  width: 100%;
+  height: 180px;
+  margin-top: 0.4rem;
+  background: #0c0c0c;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: crosshair;
+}
+
+.profile-band-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-top: 0.35rem;
+}
+
+.profile-band-controls .btn {
+  font-size: 0.78rem;
+  padding: 2px 8px;
+}
+
+.profile-band-buttons {
+  display: flex;
+  gap: 0.3rem;
+}
 
 .hidden { display: none !important; }
 

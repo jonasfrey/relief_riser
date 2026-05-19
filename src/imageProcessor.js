@@ -37,6 +37,35 @@ export function computeTargetDimensions(plateW, plateH, maxDim) {
 //                        as a single image preserving combined aspect — the
 //                        right semantic for flat plates, but it letterboxes
 //                        when the canvas aspect doesn't match source × tile.
+// Return a new canvas containing the (fractionX × fractionY) sub-rectangle of
+// `sourceCanvas` whose top-left corner sits at (offsetXFrac × w, offsetYFrac × h).
+// Used as a pre-rasterize crop step: each axis can independently scale 0…1,
+// so callers can drop e.g. the right half of the image without affecting Y.
+// Offsets are clamped to [0, 1 - fractionAxis] so the sub-rect stays inside
+// the source. When offsets are not provided, the sub-rect is centered on
+// that axis. fractionX = fractionY = 1 returns the source unchanged.
+export function subRectCanvas(sourceCanvas, fractionX, fractionY, offsetXFrac, offsetYFrac) {
+  const fX = Math.max(0.01, Math.min(1, fractionX));
+  const fY = Math.max(0.01, Math.min(1, fractionY));
+  if (fX >= 1 && fY >= 1) return sourceCanvas;
+  const w = sourceCanvas.width;
+  const h = sourceCanvas.height;
+  const cw = Math.max(2, Math.round(w * fX));
+  const ch = Math.max(2, Math.round(h * fY));
+  const maxOffsetX = 1 - fX;
+  const maxOffsetY = 1 - fY;
+  const ox = offsetXFrac != null ? Math.max(0, Math.min(maxOffsetX, offsetXFrac)) : maxOffsetX / 2;
+  const oy = offsetYFrac != null ? Math.max(0, Math.min(maxOffsetY, offsetYFrac)) : maxOffsetY / 2;
+  const cx = Math.round(ox * w);
+  const cy = Math.round(oy * h);
+  const out = document.createElement('canvas');
+  out.width = cw;
+  out.height = ch;
+  const ctx = out.getContext('2d');
+  ctx.drawImage(sourceCanvas, cx, cy, cw, ch, 0, 0, cw, ch);
+  return out;
+}
+
 export function rasterize(sourceCanvas, targetW, targetH, fitMode, opts = {}) {
   const tileX = Math.max(1, opts.tileX | 0 || 1);
   const tileY = Math.max(1, opts.tileY | 0 || 1);
@@ -127,6 +156,147 @@ export function rasterize(sourceCanvas, targetW, targetH, fitMode, opts = {}) {
   return canvas;
 }
 
+// Blend a single horizontal seam. `seamLeftCol` is the column immediately to
+// the LEFT of the seam; the matching column to the right wraps with %w so
+// that the canvas-edge seam (seamLeftCol = w-1) cleanly pairs col w-1 ↔ col 0.
+// α = 0.5 at the seam (perfect average — guarantees both sides hold the same
+// value) and tapers linearly to 0 at distance B inside, so detail outside
+// the blend zone is untouched.
+function blendXSeam(out, src, w, h, seamLeftCol, B) {
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    for (let k = 0; k < B; k++) {
+      const lx = ((seamLeftCol - k) % w + w) % w;
+      const rx = ((seamLeftCol + 1 + k) % w + w) % w;
+      const alpha = 0.5 * (1 - k / B);
+      const a = src[row + lx];
+      const b = src[row + rx];
+      out[row + lx] = (1 - alpha) * a + alpha * b;
+      out[row + rx] = (1 - alpha) * b + alpha * a;
+    }
+  }
+}
+
+function blendYSeam(out, src, w, h, seamTopRow, B) {
+  for (let k = 0; k < B; k++) {
+    const ty = ((seamTopRow - k) % h + h) % h;
+    const by = ((seamTopRow + 1 + k) % h + h) % h;
+    const alpha = 0.5 * (1 - k / B);
+    const rowT = ty * w;
+    const rowB = by * w;
+    for (let x = 0; x < w; x++) {
+      const a = src[rowT + x];
+      const b = src[rowB + x];
+      out[rowT + x] = (1 - alpha) * a + alpha * b;
+      out[rowB + x] = (1 - alpha) * b + alpha * a;
+    }
+  }
+}
+
+// Cross-fade opposing edges of the heightmap so a non-tileable texture wraps
+// without a visible seam. When the rasterizer placed tileX × tileY copies of
+// the source into the canvas, every inter-tile boundary also gets blended —
+// so a non-tileable pattern stops showing the join between adjacent copies.
+//
+// The blend width is interpreted as a percentage of ONE TILE's dimension
+// (capped to half the tile so adjacent zones never overlap). That way the
+// slider feels the same whether tileX is 1 or 10. The canvas-wrap seam
+// (col 0 ↔ col w-1) is implicitly the last tile's right edge in cylindrical
+// shapes, which is why it's always included.
+function applyEdgeInterpolation(adjusted, w, h, params) {
+  const doX = !!params.interpX;
+  const doY = !!params.interpY;
+  if (!doX && !doY) return adjusted;
+  const pct = Math.max(0, Math.min(50, params.interpWidth || 10));
+  if (pct <= 0) return adjusted;
+
+  const tileX = Math.max(1, params.tileX | 0 || 1);
+  const tileY = Math.max(1, params.tileY | 0 || 1);
+  const marginPxX = Math.max(0, Math.round(params.marginPxX || 0));
+  const marginPxY = Math.max(0, Math.round(params.marginPxY || 0));
+  const innerW = Math.max(0, w - 2 * marginPxX);
+  const innerH = Math.max(0, h - 2 * marginPxY);
+
+  let src = adjusted;
+  const out = new Float32Array(adjusted);
+
+  if (doX && innerW > 0) {
+    const tileW = innerW / tileX;
+    const Bx = Math.max(1, Math.min(
+      Math.round((pct / 100) * tileW),
+      Math.floor(tileW / 2)
+    ));
+    // tileX-1 internal seams between adjacent tile copies, plus the wrap
+    // seam at the canvas edge (col w-1 ↔ col 0). For tileX = 1 that's just
+    // the wrap; for tileX > 1 each junction inside the canvas is covered too.
+    for (let i = 0; i < tileX - 1; i++) {
+      blendXSeam(out, src, w, h, Math.round(marginPxX + (i + 1) * tileW) - 1, Bx);
+    }
+    blendXSeam(out, src, w, h, w - 1, Bx);
+    src = new Float32Array(out);
+  }
+
+  if (doY && innerH > 0) {
+    const tileH = innerH / tileY;
+    const By = Math.max(1, Math.min(
+      Math.round((pct / 100) * tileH),
+      Math.floor(tileH / 2)
+    ));
+    for (let j = 0; j < tileY - 1; j++) {
+      blendYSeam(out, src, w, h, Math.round(marginPxY + (j + 1) * tileH) - 1, By);
+    }
+    blendYSeam(out, src, w, h, h - 1, By);
+  }
+
+  return out;
+}
+
+// Composite a black-to-transparent gradient over each enabled edge of the
+// (already levels-adjusted) float grayscale array. Pixel α is the max of
+// the four per-edge ramps so opposing or adjacent gradients meet at the
+// strongest point rather than averaging. With `out = in * (1 − α)` and
+// α=1 at the edge, the very edge always reaches 0, which is what the
+// downstream heightmap reads as zero relief — i.e. a clean chamfer.
+function applyGradientFrame(adjusted, w, h, params) {
+  const pT = Math.max(0, Math.min(50, params.gradFrameTop || 0));
+  const pB = Math.max(0, Math.min(50, params.gradFrameBottom || 0));
+  const pL = Math.max(0, Math.min(50, params.gradFrameLeft || 0));
+  const pR = Math.max(0, Math.min(50, params.gradFrameRight || 0));
+  if (pT === 0 && pB === 0 && pL === 0 && pR === 0) return adjusted;
+  const topPx = (pT / 100) * h;
+  const botPx = (pB / 100) * h;
+  const leftPx = (pL / 100) * w;
+  const rightPx = (pR / 100) * w;
+  // Always allocate — `adjusted` may alias `smoothed` when the levels pass
+  // is a no-op, and we must not mutate it.
+  const out = new Float32Array(adjusted);
+  for (let y = 0; y < h; y++) {
+    let aRow = 0;
+    if (topPx > 0 && y < topPx) {
+      const a = 1 - y / topPx;
+      if (a > aRow) aRow = a;
+    }
+    if (botPx > 0 && y > h - 1 - botPx) {
+      const a = 1 - (h - 1 - y) / botPx;
+      if (a > aRow) aRow = a;
+    }
+    const rowBase = y * w;
+    for (let x = 0; x < w; x++) {
+      let a = aRow;
+      if (leftPx > 0 && x < leftPx) {
+        const av = 1 - x / leftPx;
+        if (av > a) a = av;
+      }
+      if (rightPx > 0 && x > w - 1 - rightPx) {
+        const av = 1 - (w - 1 - x) / rightPx;
+        if (av > a) a = av;
+      }
+      if (a > 0) out[rowBase + x] = adjusted[rowBase + x] * (1 - a);
+    }
+  }
+  return out;
+}
+
 export function processImage(rasterCanvas, params) {
   const w = rasterCanvas.width;
   const h = rasterCanvas.height;
@@ -189,6 +359,21 @@ export function processImage(rasterCanvas, params) {
     }
   }
 
+  // Optional edge interpolation: blend the X and/or Y edges into their
+  // wrap counterparts so a non-tileable texture revolves around a cylinder
+  // (or tiles in flat mode) without a visible seam. Applied before the
+  // gradient frame so the chamfer darkening lands on an already-seamless
+  // heightmap rather than smearing across the cross-fade.
+  const blended = applyEdgeInterpolation(adjusted, w, h, params);
+
+  // Optional gradient frame: a black overlay along each enabled edge that
+  // fades from opaque at the very edge to fully transparent `thickness%`
+  // pixels in. Applied after levels so the visible chamfer band always
+  // reaches 0 regardless of the black/white-point window, and before
+  // quantization so the gradient survives in the displayed canvas + the
+  // heightmap that's downstream of `levelsFloat` (N=1) or `levelMap`.
+  const framed = applyGradientFrame(blended, w, h, params);
+
   // levelMap (uint8) is used for display + quantized-color heightmap lookups.
   // levelsFloat (the same float array) is used by buildHeightmap in N=1 mode
   // so the continuous lithophane heightmap retains full sub-integer precision
@@ -196,23 +381,23 @@ export function processImage(rasterCanvas, params) {
   let levelMap;
   let levelsFloat = null;
   if (N === 1) {
-    levelsFloat = adjusted;
-    levelMap = new Uint8Array(adjusted.length);
-    for (let i = 0; i < adjusted.length; i++) {
-      let v = adjusted[i];
+    levelsFloat = framed;
+    levelMap = new Uint8Array(framed.length);
+    for (let i = 0; i < framed.length; i++) {
+      let v = framed[i];
       if (v < 0) v = 0; else if (v > 255) v = 255;
       levelMap[i] = v;
     }
   } else if (N === 2) {
     const t = params.threshold;
-    levelMap = new Uint8Array(adjusted.length);
-    for (let i = 0; i < adjusted.length; i++) {
-      levelMap[i] = adjusted[i] > t ? 1 : 0;
+    levelMap = new Uint8Array(framed.length);
+    for (let i = 0; i < framed.length; i++) {
+      levelMap[i] = framed[i] > t ? 1 : 0;
     }
   } else {
-    levelMap = new Uint8Array(adjusted.length);
-    for (let i = 0; i < adjusted.length; i++) {
-      let v = adjusted[i];
+    levelMap = new Uint8Array(framed.length);
+    for (let i = 0; i < framed.length; i++) {
+      let v = framed[i];
       if (v < 0) v = 0; else if (v > 255) v = 255;
       let k = Math.floor((v / 256) * N);
       if (k >= N) k = N - 1;
@@ -221,7 +406,7 @@ export function processImage(rasterCanvas, params) {
   }
 
   const displayImageData = N === 1
-    ? grayToImageData(adjusted, w, h)
+    ? grayToImageData(framed, w, h)
     : levelMapToImageData(levelMap, N, w, h);
 
   return { displayImageData, levelMap, levelsFloat, width: w, height: h, colorCount: N, dataMin, dataMax, histogram };

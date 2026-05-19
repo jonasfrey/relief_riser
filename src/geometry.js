@@ -19,6 +19,11 @@ export function estimateCustomProfileTriangleCount(Nth, Nprofile) {
   return 2 * Nth * Nprofile;
 }
 
+export function estimateSTLWrapTriangleCount(Nx, Ny) {
+  // Same topology as the regular cylinder: outer + inner shells + top/bottom caps.
+  return 4 * Nx * Ny;
+}
+
 export function estimatePolygonPrismTriangleCount(N, NxPerFace, Ny, hasChamfer) {
   // With shared outer corners the outer is also a single closed ring. Both
   // inner and outer rings have NxRing = N·(Nx−1) vertices around. Surface =
@@ -612,12 +617,29 @@ export function buildCustomProfileGeometry(heightmap, opts) {
     outerRow[(outerStart + k) % Np] = row;
   }
 
-  // Reject degenerate profiles (zero or negative radial coordinate after the
-  // outward relief offset would punch through the rotation axis).
+  // Reject profiles that punch through the rotation axis. Points exactly
+  // ON the axis (r = 0) are allowed and intentional: they collapse to a
+  // single 3D point as the profile revolves, which is how a closed bottom
+  // (or top) forms — e.g. the inner-bottom corner of a cup-shaped L profile.
+  // The resulting triangles around that point are degenerate (zero area)
+  // but harmless for STL output and rendering.
+  //
+  // CAD-emitted DXF files routinely store axis-coincident vertices as tiny
+  // negative numbers (~1e-15 mm) from floating-point round-trips. Clamp
+  // anything within `AXIS_TOL` of the axis to exactly 0, and only error if
+  // the profile is meaningfully on the wrong side.
+  const AXIS_TOL = 1e-3;   // 1 µm — well below any meaningful print precision
   let minR = Infinity;
-  for (const p of profile) if (p[0] < minR) minR = p[0];
-  if (minR <= 0) {
-    throw new Error('Custom profile: all radial coords must be > 0 (profile must lie strictly outside the axis)');
+  for (let i = 0; i < profile.length; i++) {
+    const r = profile[i][0];
+    if (r < 0 && r > -AXIS_TOL) {
+      profile[i] = [0, profile[i][1]];
+    } else if (r < minR) {
+      minR = r;
+    }
+  }
+  if (minR < 0) {
+    throw new Error('Custom profile: radial coords must be ≥ 0 (profile must not cross the axis). Points exactly on the axis are allowed and form a closed cap.');
   }
 
   const totalVerts = Nx * Np;
@@ -703,5 +725,385 @@ export function buildCustomProfileGeometry(heightmap, opts) {
     Np,
     outerStart,
     outerLength
+  };
+}
+
+// Compute R(θ, z) — for every (angular, axial) sample, the largest radius
+// at which the ray from (0, 0, z) in direction (cos θ, sin θ, 0) hits the
+// STL. Cells with no hit are left at 0.
+//
+// Algorithm: for each triangle, find the Z-grid lines it spans; for each
+// such line, intersect the triangle with that plane to get a line segment
+// in XY; then iterate the θ-grid samples covered by that segment's angular
+// arc (viewed from the Z axis) and update the max radius. This is much
+// faster than brute-force ray-triangle (each triangle's angular footprint
+// is typically a small slice of the full 2π).
+//
+// Robustness: vertices exactly on the slicing plane are treated as
+// "above" (>=) so a triangle touching the plane at a single vertex
+// contributes no slice, while an in-plane edge gives a 1-point segment.
+// Pure horizontal triangles (all three vertices at zs) are skipped.
+export function computeSTLRadiusField(stl, Nx, Ny, zmin, zmax) {
+  const R = new Float32Array(Nx * Ny);
+  const positions = stl.positions;
+  const triCount = stl.triCount;
+  if (Ny < 2 || !(zmax > zmin) || Nx < 3) return R;
+
+  const dz = (zmax - zmin) / (Ny - 1);
+  const TWO_PI = 2 * Math.PI;
+  const dTheta = TWO_PI / Nx;
+
+  // Pre-cache θ-sample sines/cosines.
+  const cosT = new Float64Array(Nx);
+  const sinT = new Float64Array(Nx);
+  for (let i = 0; i < Nx; i++) {
+    const t = i * dTheta;
+    cosT[i] = Math.cos(t);
+    sinT[i] = Math.sin(t);
+  }
+
+  for (let t = 0; t < triCount; t++) {
+    const o = t * 9;
+    const ax = positions[o],     ay = positions[o + 1], az = positions[o + 2];
+    const bx = positions[o + 3], by = positions[o + 4], bz = positions[o + 5];
+    const cx = positions[o + 6], cy = positions[o + 7], cz = positions[o + 8];
+
+    const trizmin = az < bz ? (az < cz ? az : cz) : (bz < cz ? bz : cz);
+    const trizmax = az > bz ? (az > cz ? az : cz) : (bz > cz ? bz : cz);
+
+    const jMin = Math.max(0, Math.ceil((trizmin - zmin) / dz));
+    const jMax = Math.min(Ny - 1, Math.floor((trizmax - zmin) / dz));
+    if (jMin > jMax) continue;
+
+    for (let j = jMin; j <= jMax; j++) {
+      const zs = zmin + j * dz;
+
+      // Slice the triangle at z = zs. Use the "≥ counts as above" rule so
+      // each crossing is counted exactly once even when a vertex sits on
+      // the slicing plane.
+      let x1 = 0, y1 = 0, x2 = 0, y2 = 0, n = 0;
+      // edge a→b
+      {
+        const pAbove = az >= zs, qAbove = bz >= zs;
+        if (pAbove !== qAbove) {
+          const tt = (zs - az) / (bz - az);
+          const ex = ax + tt * (bx - ax);
+          const ey = ay + tt * (by - ay);
+          if (n === 0) { x1 = ex; y1 = ey; n = 1; }
+          else { x2 = ex; y2 = ey; n = 2; }
+        }
+      }
+      // edge b→c
+      if (n < 2) {
+        const pAbove = bz >= zs, qAbove = cz >= zs;
+        if (pAbove !== qAbove) {
+          const tt = (zs - bz) / (cz - bz);
+          const ex = bx + tt * (cx - bx);
+          const ey = by + tt * (cy - by);
+          if (n === 0) { x1 = ex; y1 = ey; n = 1; }
+          else { x2 = ex; y2 = ey; n = 2; }
+        }
+      }
+      // edge c→a
+      if (n < 2) {
+        const pAbove = cz >= zs, qAbove = az >= zs;
+        if (pAbove !== qAbove) {
+          const tt = (zs - cz) / (az - cz);
+          const ex = cx + tt * (ax - cx);
+          const ey = cy + tt * (ay - cy);
+          if (n === 0) { x1 = ex; y1 = ey; n = 1; }
+          else { x2 = ex; y2 = ey; n = 2; }
+        }
+      }
+      if (n < 2) continue;
+
+      // Angular arc of the segment, viewed from the Z-axis.
+      const r1sq = x1 * x1 + y1 * y1;
+      const r2sq = x2 * x2 + y2 * y2;
+      if (r1sq < 1e-18 && r2sq < 1e-18) continue;   // segment on the axis
+
+      const theta1 = Math.atan2(y1, x1);
+      const theta2 = Math.atan2(y2, x2);
+      let dTh = theta2 - theta1;
+      if (dTh > Math.PI) dTh -= TWO_PI;
+      else if (dTh < -Math.PI) dTh += TWO_PI;
+
+      const thStart = theta1;
+      const thEnd = theta1 + dTh;
+      const thLo = thStart < thEnd ? thStart : thEnd;
+      const thHi = thStart < thEnd ? thEnd : thStart;
+
+      const iLo = Math.ceil(thLo / dTheta);
+      const iHi = Math.floor(thHi / dTheta);
+      if (iLo > iHi) continue;
+
+      const A0 = -y1;     // x1·sin(0) − y1·cos(0) = -y1; will be re-derived per θ below
+      const dx = x2 - x1;
+      const dy = y2 - y1;
+
+      for (let ii = iLo; ii <= iHi; ii++) {
+        const i = ((ii % Nx) + Nx) % Nx;
+        const c = cosT[i], s = sinT[i];
+
+        // Find segment parameter where (P(s_param) − origin) is on the ray.
+        // P(s_param) lies on the ray line ⇔ P.x·sinθ − P.y·cosθ = 0.
+        // Let A = x1 sinθ − y1 cosθ, B = x2 sinθ − y2 cosθ; s = A / (A − B).
+        const A = x1 * s - y1 * c;
+        const B = x2 * s - y2 * c;
+        const denom = A - B;
+        if (denom === 0) continue;
+        const sp = A / denom;
+        if (sp < 0 || sp > 1) continue;
+        const xh = x1 + sp * dx;
+        const yh = y1 + sp * dy;
+        const r = xh * c + yh * s;
+        if (r <= 0) continue;
+
+        const idx = i + j * Nx;
+        if (r > R[idx]) R[idx] = r;
+        // Suppress unused-var warning for the rare path; A0 is intentionally
+        // unused (kept above only as documentation).
+        void A0;
+      }
+    }
+  }
+
+  return R;
+}
+
+// Cylindrical wrap around a custom STL's outer surface. The STL is centered
+// on the Z axis (XY bounding-box centroid → origin) and rests on z = 0. The
+// outer shell follows the STL surface (sampled radially at each θ, z grid
+// cell) plus the relief; the inner shell is a constant inset of
+// `baseThickness` from the outer.
+//
+// Topology matches buildCylindricalGeometry: outer ring × Ny + inner ring ×
+// Ny vertices, plus optional closed bottom. The mesh is watertight by
+// construction the same way.
+//
+// closedBottom (default true): inner surface stops at z = B, solid floor at
+// z = 0, inner-cap disc at z = B seals the void. Open mode = annular bottom.
+//
+// Inputs
+//   heightmap.data: Float32Array(Nx · Ny) — relief in mm at each (θ, z) cell
+//   opts.stl:         { positions, triCount } — target STL
+//   opts.baseThickness: wall thickness (mm) of the inner shell offset
+//   opts.closedBottom:  boolean (default true)
+//   opts.fallbackRadius: radius to use for cells the STL doesn't cover
+//                        (e.g. axisymmetry holes). Defaults to the row's max.
+export function buildSTLWrapGeometry(heightmap, opts) {
+  const Nx = heightmap.width;
+  const Ny = heightmap.height;
+  if (Nx < 3 || Ny < 2) {
+    throw new Error('STL wrap mesh requires Nx >= 3 and Ny >= 2');
+  }
+  const stl = opts.stl;
+  if (!stl || !stl.positions || !stl.triCount) {
+    throw new Error('STL wrap: missing or empty target STL');
+  }
+  const B = opts.baseThickness;
+  const closedBottom = opts.closedBottom !== false;
+
+  // XY-center + Z-zero the STL so the rotation axis passes through the XY
+  // centroid and the model rests on z = 0.
+  let xmin = Infinity, xmax = -Infinity;
+  let ymin = Infinity, ymax = -Infinity;
+  let zmin = Infinity, zmax = -Infinity;
+  for (let i = 0; i < stl.positions.length; i += 3) {
+    const x = stl.positions[i], y = stl.positions[i + 1], z = stl.positions[i + 2];
+    if (x < xmin) xmin = x; if (x > xmax) xmax = x;
+    if (y < ymin) ymin = y; if (y > ymax) ymax = y;
+    if (z < zmin) zmin = z; if (z > zmax) zmax = z;
+  }
+  if (!(zmax > zmin)) throw new Error('STL wrap: target STL has zero Z extent');
+  const H = zmax - zmin;
+  const cxX = (xmin + xmax) / 2;
+  const cyY = (ymin + ymax) / 2;
+
+  const centered = {
+    positions: new Float32Array(stl.positions.length),
+    triCount: stl.triCount
+  };
+  for (let i = 0; i < stl.positions.length; i += 3) {
+    centered.positions[i]     = stl.positions[i]     - cxX;
+    centered.positions[i + 1] = stl.positions[i + 1] - cyY;
+    centered.positions[i + 2] = stl.positions[i + 2] - zmin;
+  }
+
+  // Sample slightly inside [0, H] so that the very top / bottom rings —
+  // where STL triangles may have a vertex exactly on the plane — don't
+  // degenerate to "no hit" rows. The relief surface still spans 0…H.
+  const eps = H * 1e-4;
+  const zSampleMin = eps;
+  const zSampleMax = H - eps;
+
+  const R = computeSTLRadiusField(centered, Nx, Ny, zSampleMin, zSampleMax);
+
+  // Fill rays that missed the STL. For each row, use circular-nearest
+  // interpolation (well-defined since θ wraps) to fill gaps. If a whole
+  // row missed, fall back to the global max.
+  let globalMax = 0;
+  for (let i = 0; i < R.length; i++) if (R[i] > globalMax) globalMax = R[i];
+  if (globalMax === 0) {
+    throw new Error('STL wrap: no rays hit the STL. Check that the STL encloses its Z axis (it should sit roughly centered on its own XY bounding box).');
+  }
+  for (let j = 0; j < Ny; j++) {
+    const row = j * Nx;
+    // Find first nonzero in the row to seed circular fill.
+    let firstHit = -1;
+    for (let i = 0; i < Nx; i++) if (R[row + i] > 0) { firstHit = i; break; }
+    if (firstHit < 0) {
+      for (let i = 0; i < Nx; i++) R[row + i] = globalMax;
+      continue;
+    }
+    // Fill any zeros by walking forward and linearly interpolating between
+    // the surrounding hits (going around the ring).
+    for (let k = 0; k < Nx; k++) {
+      const i = (firstHit + k) % Nx;
+      if (R[row + i] > 0) continue;
+      // Find next hit going forward.
+      let nextK = -1, nextR = 0;
+      for (let m = 1; m < Nx; m++) {
+        const ni = (i + m) % Nx;
+        if (R[row + ni] > 0) { nextK = m; nextR = R[row + ni]; break; }
+      }
+      // Find previous hit going backward.
+      let prevK = -1, prevR = 0;
+      for (let m = 1; m < Nx; m++) {
+        const pi = (i - m + Nx) % Nx;
+        if (R[row + pi] > 0) { prevK = m; prevR = R[row + pi]; break; }
+      }
+      const total = (nextK >= 0 ? nextK : 0) + (prevK >= 0 ? prevK : 0);
+      R[row + i] = total > 0
+        ? (prevR * (nextK || 0) + nextR * (prevK || 0)) / total
+        : globalMax;
+    }
+  }
+
+  if (closedBottom && B >= H) {
+    throw new Error('Base thickness must be smaller than STL height for closed bottom');
+  }
+
+  // Inner shell at R - B; refuse if that would punch through the rotation axis.
+  let minR = Infinity;
+  for (let i = 0; i < R.length; i++) if (R[i] < minR) minR = R[i];
+  if (!(minR > B)) {
+    throw new Error(`Base thickness (${B} mm) must be smaller than the STL's smallest cross-section radius (${minR.toFixed(2)} mm). Try a thinner wall or a wider STL.`);
+  }
+
+  const innerZBottom = closedBottom ? B : 0;
+  const extraVerts = closedBottom ? 2 : 0;
+  const totalVerts = 2 * Nx * Ny + extraVerts;
+  const positions = new Float32Array(totalVerts * 3);
+  const innerOffset = Nx * Ny;
+
+  const cosT = new Float32Array(Nx);
+  const sinT = new Float32Array(Nx);
+  for (let i = 0; i < Nx; i++) {
+    const t = (i / Nx) * 2 * Math.PI;
+    cosT[i] = Math.cos(t);
+    sinT[i] = Math.sin(t);
+  }
+
+  // Outer surface (per-vertex radius from R(θ, z), plus relief from heightmap).
+  for (let j = 0; j < Ny; j++) {
+    const z = H - (j / (Ny - 1)) * H;
+    for (let i = 0; i < Nx; i++) {
+      const idx = i + j * Nx;
+      const r = R[idx] + heightmap.data[idx];
+      const vi = idx * 3;
+      positions[vi]     = r * cosT[i];
+      positions[vi + 1] = r * sinT[i];
+      positions[vi + 2] = z;
+    }
+  }
+  // Inner surface (R - B, constant inset). Z range: [innerZBottom, H] —
+  // shrunk for closedBottom so the inner shell sits above the floor.
+  for (let j = 0; j < Ny; j++) {
+    const z = H - (j / (Ny - 1)) * (H - innerZBottom);
+    for (let i = 0; i < Nx; i++) {
+      const idx = i + j * Nx;
+      const rInner = R[idx] - B;
+      const vi = (innerOffset + idx) * 3;
+      positions[vi]     = rInner * cosT[i];
+      positions[vi + 1] = rInner * sinT[i];
+      positions[vi + 2] = z;
+    }
+  }
+
+  const centerBase = 2 * Nx * Ny;
+  const bottomCenter = closedBottom ? centerBase : -1;
+  const floorCenter  = closedBottom ? centerBase + 1 : -1;
+  if (closedBottom) {
+    positions[bottomCenter * 3]     = 0;
+    positions[bottomCenter * 3 + 1] = 0;
+    positions[bottomCenter * 3 + 2] = 0;
+    positions[floorCenter * 3]      = 0;
+    positions[floorCenter * 3 + 1]  = 0;
+    positions[floorCenter * 3 + 2]  = B;
+  }
+
+  const triCount = estimateSTLWrapTriangleCount(Nx, Ny);
+  const indices = new Uint32Array(triCount * 3);
+  let p = 0;
+
+  const wrap = (i) => (i === Nx ? 0 : i);
+  const outer = (i, j) => wrap(i) + j * Nx;
+  const inner = (i, j) => innerOffset + wrap(i) + j * Nx;
+
+  // Outer surface (outward normal).
+  for (let j = 0; j < Ny - 1; j++) {
+    for (let i = 0; i < Nx; i++) {
+      const a = outer(i, j), b = outer(i + 1, j);
+      const c = outer(i + 1, j + 1), d = outer(i, j + 1);
+      indices[p++] = a; indices[p++] = d; indices[p++] = c;
+      indices[p++] = a; indices[p++] = c; indices[p++] = b;
+    }
+  }
+  // Inner surface (inward normal — reverse winding).
+  for (let j = 0; j < Ny - 1; j++) {
+    for (let i = 0; i < Nx; i++) {
+      const a = inner(i, j), b = inner(i + 1, j);
+      const c = inner(i + 1, j + 1), d = inner(i, j + 1);
+      indices[p++] = a; indices[p++] = c; indices[p++] = d;
+      indices[p++] = a; indices[p++] = b; indices[p++] = c;
+    }
+  }
+  // Top cap (z = H, +Z normal): annular ring outer→inner.
+  for (let i = 0; i < Nx; i++) {
+    const a = outer(i, 0),     b = outer(i + 1, 0);
+    const c = inner(i + 1, 0), d = inner(i, 0);
+    indices[p++] = a; indices[p++] = b; indices[p++] = c;
+    indices[p++] = a; indices[p++] = c; indices[p++] = d;
+  }
+  if (!closedBottom) {
+    for (let i = 0; i < Nx; i++) {
+      const a = outer(i, Ny - 1),     b = outer(i + 1, Ny - 1);
+      const c = inner(i + 1, Ny - 1), d = inner(i, Ny - 1);
+      indices[p++] = a; indices[p++] = c; indices[p++] = b;
+      indices[p++] = a; indices[p++] = d; indices[p++] = c;
+    }
+  } else {
+    for (let i = 0; i < Nx; i++) {
+      const a = outer(i,     Ny - 1);
+      const b = outer(i + 1, Ny - 1);
+      indices[p++] = bottomCenter; indices[p++] = b; indices[p++] = a;
+    }
+    for (let i = 0; i < Nx; i++) {
+      const i0 = inner(i,     Ny - 1);
+      const i1 = inner(i + 1, Ny - 1);
+      indices[p++] = floorCenter; indices[p++] = i0; indices[p++] = i1;
+    }
+  }
+
+  return {
+    positions,
+    indices,
+    triCount,
+    vertCount: totalVerts,
+    Nx,
+    Ny,
+    stlHeight: H,
+    stlMaxR: globalMax
   };
 }

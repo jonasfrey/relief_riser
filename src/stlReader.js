@@ -7,6 +7,13 @@ export async function loadSTLFromFile(file) {
   return parseSTL(buffer);
 }
 
+export async function loadSTLFromUrl(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`STL fetch ${url}: ${res.status} ${res.statusText}`);
+  const buffer = await res.arrayBuffer();
+  return parseSTL(buffer);
+}
+
 export function parseSTL(buffer) {
   if (buffer.byteLength >= 84) {
     const view = new DataView(buffer);

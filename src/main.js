@@ -7,9 +7,10 @@ import {
   paintToCanvas,
   loadImageFromFile,
   detectContentBBox,
-  cropCanvas
+  cropCanvas,
+  subRectCanvas
 } from './imageProcessor.js';
-import { loadSTLFromFile } from './stlReader.js';
+import { loadSTLFromFile, loadSTLFromUrl } from './stlReader.js';
 import { loadGLBFromFile } from './glbReader.js';
 import { projectSTLToCanvas } from './stlProjector.js';
 import {
@@ -17,10 +18,12 @@ import {
   buildCylindricalGeometry,
   buildPolygonPrismGeometry,
   buildCustomProfileGeometry,
+  buildSTLWrapGeometry,
   estimateTriangleCount,
   estimateCylindricalTriangleCount,
   estimatePolygonPrismTriangleCount,
-  estimateCustomProfileTriangleCount
+  estimateCustomProfileTriangleCount,
+  estimateSTLWrapTriangleCount
 } from './geometry.js';
 import {
   loadDxfFromFile,
@@ -73,6 +76,13 @@ const els = {
   tileY: $('tileY'),                 tileYNum: $('tileYNum'),
   marginX: $('marginX'),             marginXNum: $('marginXNum'),
   marginY: $('marginY'),             marginYNum: $('marginYNum'),
+  gradFrameTop:    $('gradFrameTop'),    gradFrameTopNum:    $('gradFrameTopNum'),
+  gradFrameBottom: $('gradFrameBottom'), gradFrameBottomNum: $('gradFrameBottomNum'),
+  gradFrameLeft:   $('gradFrameLeft'),   gradFrameLeftNum:   $('gradFrameLeftNum'),
+  gradFrameRight:  $('gradFrameRight'),  gradFrameRightNum:  $('gradFrameRightNum'),
+  interpX:         $('interpX'),
+  interpY:         $('interpY'),
+  interpWidth:     $('interpWidth'),     interpWidthNum:     $('interpWidthNum'),
 
   showSolid: $('showSolid'),
   showWireframe: $('showWireframe'),
@@ -86,14 +96,24 @@ const els = {
   chamferTop: $('chamferTop'),       chamferTopNum: $('chamferTopNum'),
   chamferTopControl: $('chamferTopControl'),
   customProfileControls: $('customProfileControls'),
+  stlWrapControls: $('stlWrapControls'),
+  wrapStlFile: $('wrapStlFile'),
+  wrapStlResetBtn: $('wrapStlResetBtn'),
+  wrapStlStatus: $('wrapStlStatus'),
+  wrapAutoTiles: $('wrapAutoTiles'),
   profileFile: $('profileFile'),
   profileResetBtn: $('profileResetBtn'),
   profileStatus: $('profileStatus'),
+  profilePreview: $('profilePreview'),
+  profileBandMode: $('profileBandMode'),
+  profileBandReset: $('profileBandReset'),
+  profileBandFlip: $('profileBandFlip'),
   radiusFactor: $('radiusFactor'),   radiusFactorNum: $('radiusFactorNum'),
   heightFactor: $('heightFactor'),   heightFactorNum: $('heightFactorNum'),
   outerBandFrac: $('outerBandFrac'), outerBandFracNum: $('outerBandFracNum'),
   plateW: $('plateW'),               plateWNum: $('plateWNum'),
   plateWLabel: $('plateWLabel'),
+  derivedDimsHint: $('derivedDimsHint'),
   plateWControl: null,               plateHControl: null,
   baseThicknessControl: null,
   plateH: $('plateH'),               plateHNum: $('plateHNum'),
@@ -104,6 +124,10 @@ const els = {
   fitMode: $('fitMode'),
   autoCrop: $('autoCrop'),
   rotation: $('rotation'),
+  zoomSliderX: $('zoomSliderX'),     zoomSliderXNum: $('zoomSliderXNum'),
+  zoomSliderY: $('zoomSliderY'),     zoomSliderYNum: $('zoomSliderYNum'),
+  alignX: $('alignX'),
+  alignY: $('alignY'),
   cropBadge: $('cropBadge'),
 
   asciiSTL: $('asciiSTL'),
@@ -142,7 +166,14 @@ const sliderPairs = [
   ['baseThickness', 'baseThicknessNum'],
   ['radiusFactor', 'radiusFactorNum'],
   ['heightFactor', 'heightFactorNum'],
-  ['outerBandFrac', 'outerBandFracNum']
+  ['outerBandFrac', 'outerBandFracNum'],
+  ['gradFrameTop',    'gradFrameTopNum'],
+  ['gradFrameBottom', 'gradFrameBottomNum'],
+  ['gradFrameLeft',   'gradFrameLeftNum'],
+  ['gradFrameRight',  'gradFrameRightNum'],
+  ['interpWidth',     'interpWidthNum'],
+  ['zoomSliderX',     'zoomSliderXNum'],
+  ['zoomSliderY',     'zoomSliderYNum']
 ];
 
 function linkPair(rangeEl, numEl) {
@@ -175,8 +206,24 @@ function clampToInputRange(el, v) {
 
 sliderPairs.forEach(([r, n]) => linkPair(els[r], els[n]));
 
-['invert', 'mapDir', 'fitMode', 'closedBottom'].forEach((id) => {
+['invert', 'mapDir', 'fitMode', 'closedBottom', 'interpX', 'interpY'].forEach((id) => {
   els[id].addEventListener('change', () => onParamChange());
+});
+
+els.wrapAutoTiles.addEventListener('change', () => onParamChange());
+
+['alignX', 'alignY'].forEach((id) => {
+  els[id].addEventListener('change', () => {
+    paintSourceWithOverlay();
+    onParamChange();
+  });
+});
+
+// Slider pairs already trigger onParamChange (which rebuilds the heightmap).
+// The orange crop-rect overlay also needs to track the slider value live so
+// dragging gives instant visual feedback.
+['zoomSliderX', 'zoomSliderXNum', 'zoomSliderY', 'zoomSliderYNum'].forEach((id) => {
+  els[id].addEventListener('input', () => paintSourceWithOverlay());
 });
 
 // Clipping highlight only changes how the processed canvas is painted, not
@@ -213,6 +260,9 @@ els.shape.addEventListener('change', () => {
   if (state.shape === 'customProfile' && !state.profilePoints) {
     loadDefaultProfile();   // fire-and-forget; pipeline re-runs when it lands
   }
+  if (state.shape === 'stlWrap' && !state.wrapStl) {
+    loadDefaultWrapStl();   // fire-and-forget; pipeline re-runs when it lands
+  }
   onParamChange();
 });
 
@@ -224,7 +274,11 @@ els.profileFile.addEventListener('change', async (e) => {
     state.profilePoints = points;
     state.profileSource = 'user';
     state.profileFilename = file.name;
+    state.profileBandManual = null;
+    state.profileBandPicking = null;
     setProfileStatus(`Loaded ${file.name} — ${points.length} points`);
+    updateBandModeLabel();
+    drawProfilePreview();
     triggerProcessing(true);
   } catch (err) {
     setProfileStatus(`Error: ${err.message}`, true);
@@ -233,6 +287,74 @@ els.profileFile.addEventListener('change', async (e) => {
 
 els.profileResetBtn.addEventListener('click', () => loadDefaultProfile());
 
+els.wrapStlFile.addEventListener('change', async (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  try {
+    const mesh = await loadSTLFromFile(file);
+    state.wrapStl = mesh;
+    state.wrapStlFilename = file.name;
+    state.wrapStlSource = 'user';
+    state.wrapStlInfo = computeWrapStlInfo(mesh);
+    setWrapStlStatus(formatWrapStlInfo(file.name, state.wrapStlInfo));
+    applyDerivedDims();
+    triggerProcessing(true);
+  } catch (err) {
+    setWrapStlStatus(`Error: ${err.message}`, true);
+  }
+});
+
+els.wrapStlResetBtn.addEventListener('click', () => loadDefaultWrapStl());
+
+async function loadDefaultWrapStl() {
+  setWrapStlStatus('Loading default STL…');
+  try {
+    const mesh = await loadSTLFromUrl('default_wrap.stl');
+    state.wrapStl = mesh;
+    state.wrapStlFilename = 'BIC_lighter_holder_TT_J26_MAXI.stl';
+    state.wrapStlSource = 'default';
+    state.wrapStlInfo = computeWrapStlInfo(mesh);
+    setWrapStlStatus(formatWrapStlInfo(state.wrapStlFilename, state.wrapStlInfo));
+    applyDerivedDims();
+    triggerProcessing(true);
+  } catch (err) {
+    setWrapStlStatus(`Could not load default STL: ${err.message}`, true);
+  }
+}
+
+function setWrapStlStatus(msg, isError) {
+  els.wrapStlStatus.textContent = msg;
+  els.wrapStlStatus.style.color = isError ? '#c33' : '';
+}
+
+// Compute the metrics the rasterization pipeline needs: max radius from the
+// XY-bbox centroid (drives circumference) and Z-extent (drives height).
+function computeWrapStlInfo(stl) {
+  if (!stl || !stl.positions || !stl.triCount) return null;
+  const p = stl.positions;
+  let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity;
+  let zmin = Infinity, zmax = -Infinity;
+  for (let i = 0; i < p.length; i += 3) {
+    if (p[i]     < xmin) xmin = p[i];     if (p[i]     > xmax) xmax = p[i];
+    if (p[i + 1] < ymin) ymin = p[i + 1]; if (p[i + 1] > ymax) ymax = p[i + 1];
+    if (p[i + 2] < zmin) zmin = p[i + 2]; if (p[i + 2] > zmax) zmax = p[i + 2];
+  }
+  const cx = (xmin + xmax) / 2, cy = (ymin + ymax) / 2;
+  let maxR = 0;
+  for (let i = 0; i < p.length; i += 3) {
+    const dx = p[i] - cx, dy = p[i + 1] - cy;
+    const r = Math.sqrt(dx * dx + dy * dy);
+    if (r > maxR) maxR = r;
+  }
+  return { maxR, height: zmax - zmin, triCount: stl.triCount };
+}
+
+function formatWrapStlInfo(name, info) {
+  if (!info) return name;
+  const fmt = (v) => v.toFixed(2);
+  return `${name} — ${info.triCount.toLocaleString('en-US')} tris · max R ${fmt(info.maxR)} mm · H ${fmt(info.height)} mm`;
+}
+
 async function loadDefaultProfile() {
   setProfileStatus('Loading default profile…');
   try {
@@ -240,7 +362,11 @@ async function loadDefaultProfile() {
     state.profilePoints = points;
     state.profileSource = 'default';
     state.profileFilename = 'default_ring_profile.dxf';
+    state.profileBandManual = null;
+    state.profileBandPicking = null;
     setProfileStatus(`Default profile — ${points.length} points`);
+    updateBandModeLabel();
+    drawProfilePreview();
     triggerProcessing(true);
   } catch (err) {
     setProfileStatus(`Could not load default profile: ${err.message}`, true);
@@ -252,10 +378,316 @@ function setProfileStatus(msg, isError) {
   els.profileStatus.style.color = isError ? '#c33' : '';
 }
 
+// Pick the contiguous slice of the profile that receives the relief.
+// Manual override (set by clicking two endpoints in the preview) wins;
+// otherwise fall back to the slider-driven auto detection.
+function selectBand(scaled, bandFrac) {
+  if (
+    state.profileBandManual &&
+    state.profileBandManual.length >= 2 &&
+    state.profileBandManual.startIdx >= 0 &&
+    state.profileBandManual.startIdx < scaled.length &&
+    state.profileBandManual.length <= scaled.length
+  ) {
+    return state.profileBandManual;
+  }
+  let maxX = -Infinity, minX = Infinity;
+  for (const p of scaled) {
+    if (p[0] > maxX) maxX = p[0];
+    if (p[0] < minX) minX = p[0];
+  }
+  const eps = (maxX - minX) * Math.max(0.01, Math.min(1, bandFrac / 100));
+  return findOuterBand(scaled, eps);
+}
+
+// Compute the same scaling + canvas mapping `drawProfilePreview` uses, so
+// click handlers can hit-test against the rendered geometry without drift.
+function profileViewMapping() {
+  const canvas = els.profilePreview;
+  const pts = state.profilePoints;
+  if (!canvas || !pts || pts.length < 3) return null;
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = canvas.clientWidth || 280;
+  const cssH = canvas.clientHeight || 180;
+  const W = Math.max(2, Math.round(cssW * dpr));
+  const H = Math.max(2, Math.round(cssH * dpr));
+  const rf = parseFloat(els.radiusFactor.value) || 1;
+  const hf = parseFloat(els.heightFactor.value) || 1;
+  const scaled = pts.map(([x, y]) => [x * rf, y * hf]);
+  let maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const p of scaled) {
+    if (p[0] > maxX) maxX = p[0];
+    if (p[1] < minY) minY = p[1];
+    if (p[1] > maxY) maxY = p[1];
+  }
+  const heightMM = maxY - minY;
+  if (!(maxX > 0) || !(heightMM > 0)) return null;
+  const pad = 18 * dpr;
+  const labelPadTop = 14 * dpr;
+  const labelPadBot = 14 * dpr;
+  const availW = W - pad * 2;
+  const availH = H - pad * 2 - labelPadTop - labelPadBot;
+  const s = Math.min(availW / (2 * maxX), availH / heightMM);
+  const cx = W / 2;
+  const cy = H - pad - labelPadBot - (-minY) * s;
+  const toCanvas = ([x, y]) => [cx + x * s, cy - y * s];
+  return { dpr, W, H, scaled, maxX, minY, maxY, heightMM, pad, cx, cy, s, toCanvas };
+}
+
+// Given two profile indices that the user clicked, pick which of the two
+// arc directions around the closed loop should be the relief band. The
+// direction whose points sit at higher mean X is the "outer" side and is
+// almost always what the user means.
+function pickBandDirection(a, b) {
+  const pts = state.profilePoints;
+  const n = pts.length;
+  const lenAB = ((b - a + n) % n) + 1;
+  const lenBA = ((a - b + n) % n) + 1;
+  const meanX = (start, length) => {
+    let sum = 0;
+    for (let k = 0; k < length; k++) sum += pts[(start + k) % n][0];
+    return sum / length;
+  };
+  return meanX(a, lenAB) >= meanX(b, lenBA)
+    ? { startIdx: a, length: lenAB }
+    : { startIdx: b, length: lenBA };
+}
+
+function updateBandModeLabel() {
+  if (!els.profileBandMode) return;
+  if (state.profileBandPicking) {
+    els.profileBandMode.textContent = 'Click second endpoint to set band';
+    els.profileBandReset.textContent = 'Cancel';
+    els.profileBandReset.classList.remove('hidden');
+    els.profileBandFlip.classList.add('hidden');
+  } else if (state.profileBandManual) {
+    els.profileBandMode.textContent = 'Band: manual — slider disabled';
+    els.profileBandReset.textContent = 'Use auto';
+    els.profileBandReset.classList.remove('hidden');
+    els.profileBandFlip.classList.remove('hidden');
+  } else {
+    els.profileBandMode.textContent = 'Band: auto · click profile to pick manually';
+    els.profileBandReset.classList.add('hidden');
+    els.profileBandFlip.classList.add('hidden');
+  }
+}
+
+// Render the loaded profile (post-radius/height scaling) into the preview
+// canvas. Shows the rotation axis (dashed), the profile polyline, a faint
+// mirror across the axis to convey the revolution, and highlights the relief
+// band — auto-detected by `outerBandFrac` or manually picked via two clicks.
+function drawProfilePreview() {
+  const canvas = els.profilePreview;
+  if (!canvas) return;
+
+  const map = profileViewMapping();
+  if (!map) {
+    // Still resize the buffer so the canvas isn't a stale bitmap.
+    const dpr0 = window.devicePixelRatio || 1;
+    canvas.width = Math.max(2, Math.round((canvas.clientWidth || 280) * dpr0));
+    canvas.height = Math.max(2, Math.round((canvas.clientHeight || 180) * dpr0));
+    canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+    return;
+  }
+  const { dpr, W, H, scaled, maxX, heightMM, pad, cx, toCanvas } = map;
+  if (canvas.width !== W) canvas.width = W;
+  if (canvas.height !== H) canvas.height = H;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, W, H);
+
+  const bandFrac = parseFloat(els.outerBandFrac.value) || 50;
+  const band = selectBand(scaled, bandFrac);
+
+  // --- rotation axis (X = 0) ---
+  ctx.save();
+  ctx.strokeStyle = 'rgba(140, 150, 170, 0.55)';
+  ctx.setLineDash([6 * dpr, 4 * dpr]);
+  ctx.lineWidth = 1 * dpr;
+  ctx.beginPath();
+  ctx.moveTo(cx, pad);
+  ctx.lineTo(cx, H - pad);
+  ctx.stroke();
+  ctx.restore();
+
+  // --- mirrored (left) copy: dimmer, to convey the revolution ---
+  ctx.save();
+  ctx.strokeStyle = 'rgba(160, 175, 200, 0.30)';
+  ctx.lineWidth = 1 * dpr;
+  ctx.beginPath();
+  for (let i = 0; i < scaled.length; i++) {
+    const [x, y] = scaled[i];
+    const [px, py] = toCanvas([-x, y]);
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.stroke();
+  ctx.restore();
+
+  // --- main profile polyline ---
+  ctx.save();
+  ctx.strokeStyle = '#cdd3df';
+  ctx.lineWidth = 1.5 * dpr;
+  ctx.beginPath();
+  for (let i = 0; i < scaled.length; i++) {
+    const [px, py] = toCanvas(scaled[i]);
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.stroke();
+  ctx.restore();
+
+  // --- outer band (relief target) ---
+  if (band.length >= 2) {
+    ctx.save();
+    ctx.strokeStyle = '#6c8cff';
+    ctx.lineWidth = 2.6 * dpr;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    for (let k = 0; k < band.length; k++) {
+      const p = scaled[(band.startIdx + k) % scaled.length];
+      const [px, py] = toCanvas(p);
+      if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // --- max-radius indicator on the X axis ---
+  ctx.save();
+  ctx.strokeStyle = 'rgba(108, 140, 255, 0.45)';
+  ctx.setLineDash([3 * dpr, 3 * dpr]);
+  ctx.lineWidth = 1 * dpr;
+  const [maxRX, maxRY] = toCanvas([maxX, 0]);
+  ctx.beginPath();
+  ctx.moveTo(cx, maxRY);
+  ctx.lineTo(maxRX, maxRY);
+  ctx.stroke();
+  ctx.restore();
+
+  // --- band endpoint markers (manual mode) and picking marker ---
+  const drawDot = (idx, fill, stroke) => {
+    if (idx < 0 || idx >= scaled.length) return;
+    const [px, py] = toCanvas(scaled[idx]);
+    ctx.save();
+    ctx.fillStyle = fill;
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = 1.5 * dpr;
+    ctx.beginPath();
+    ctx.arc(px, py, 4 * dpr, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  };
+  if (state.profileBandManual && band.length >= 2) {
+    drawDot(band.startIdx, '#6c8cff', '#0c0c0c');
+    drawDot((band.startIdx + band.length - 1) % scaled.length, '#6c8cff', '#0c0c0c');
+  }
+  if (state.profileBandPicking) {
+    drawDot(state.profileBandPicking.firstIdx, '#f5b042', '#0c0c0c');
+  }
+
+  // --- labels ---
+  ctx.save();
+  ctx.fillStyle = '#9a9ca5';
+  ctx.font = `${10 * dpr}px ui-monospace, monospace`;
+  ctx.textBaseline = 'top';
+  ctx.textAlign = 'left';
+  ctx.fillText(`R ${maxX.toFixed(2)} mm`, 6 * dpr, 4 * dpr);
+  ctx.textAlign = 'right';
+  ctx.fillText(`H ${heightMM.toFixed(2)} mm`, W - 6 * dpr, 4 * dpr);
+  ctx.fillStyle = '#6c8cff';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'bottom';
+  ctx.fillText(state.profileBandManual ? 'relief band (manual)' : 'relief band', 6 * dpr, H - 4 * dpr);
+  ctx.fillStyle = '#9a9ca5';
+  ctx.textAlign = 'right';
+  ctx.fillText('axis ⇡', W - 6 * dpr, H - 4 * dpr);
+  ctx.restore();
+}
+
+// Map a mouse event on the preview canvas to the nearest profile index,
+// using the same scaling / projection as `drawProfilePreview`. Returns -1
+// when no profile is loaded.
+function nearestProfileIndexFromEvent(e) {
+  const map = profileViewMapping();
+  if (!map) return -1;
+  const rect = els.profilePreview.getBoundingClientRect();
+  const xCss = e.clientX - rect.left;
+  const yCss = e.clientY - rect.top;
+  const px = xCss * (map.W / rect.width);
+  const py = yCss * (map.H / rect.height);
+  let best = -1;
+  let bestD2 = Infinity;
+  for (let i = 0; i < map.scaled.length; i++) {
+    const [qx, qy] = map.toCanvas(map.scaled[i]);
+    const d2 = (qx - px) * (qx - px) + (qy - py) * (qy - py);
+    if (d2 < bestD2) { bestD2 = d2; best = i; }
+  }
+  return best;
+}
+
+els.profilePreview.addEventListener('click', (e) => {
+  if (!state.profilePoints || state.profilePoints.length < 3) return;
+  const idx = nearestProfileIndexFromEvent(e);
+  if (idx < 0) return;
+  if (!state.profileBandPicking) {
+    state.profileBandPicking = { firstIdx: idx };
+    updateBandModeLabel();
+    drawProfilePreview();
+    return;
+  }
+  const first = state.profileBandPicking.firstIdx;
+  state.profileBandPicking = null;
+  if (idx === first) {
+    // Same point twice — treat as a cancel rather than a 1-point band.
+    updateBandModeLabel();
+    drawProfilePreview();
+    return;
+  }
+  state.profileBandManual = pickBandDirection(first, idx);
+  updateBandModeLabel();
+  drawProfilePreview();
+  triggerProcessing(true);
+});
+
+els.profileBandReset.addEventListener('click', () => {
+  state.profileBandManual = null;
+  state.profileBandPicking = null;
+  updateBandModeLabel();
+  drawProfilePreview();
+  triggerProcessing(true);
+});
+
+// Swap to the other arc of the closed loop. The two arcs share endpoints
+// and together cover every point exactly once except the endpoints, so
+// lengthA + lengthB = n + 2 (the +2 accounts for the shared endpoints).
+els.profileBandFlip.addEventListener('click', () => {
+  const m = state.profileBandManual;
+  if (!m || !state.profilePoints) return;
+  const n = state.profilePoints.length;
+  const newStart = (m.startIdx + m.length - 1) % n;
+  const newLen = n + 2 - m.length;
+  if (newLen < 2 || newLen > n) return;
+  state.profileBandManual = { startIdx: newStart, length: newLen };
+  drawProfilePreview();
+  triggerProcessing(true);
+});
+
+// Touching the outer-band slider implies the user wants auto detection
+// back. Without this the slider would silently no-op in manual mode.
+['outerBandFrac', 'outerBandFracNum'].forEach((id) => {
+  els[id].addEventListener('input', () => {
+    if (state.profileBandManual) {
+      state.profileBandManual = null;
+      updateBandModeLabel();
+    }
+  });
+});
+
 els.autoCrop.addEventListener('change', () => {
   state.autoCrop = els.autoCrop.checked;
   applyAutoCrop();
-  autoFitHeightToImage();
+  applyDerivedDims();
   persist();
   triggerProcessing(true);
 });
@@ -264,7 +696,7 @@ els.rotation.addEventListener('change', () => {
   state.rotation = parseInt(els.rotation.value, 10) || 0;
   applyRotation();
   applyAutoCrop();
-  autoFitHeightToImage();
+  applyDerivedDims();
   persist();
   triggerProcessing(true);
 });
@@ -299,7 +731,10 @@ els.autoDistribute.addEventListener('click', () => {
 
 // ---------- state ----------
 
-const STORAGE_KEY = 'relief-riser-params-v2';
+// v3 bump: W slider's meaning is now shape-dependent (radius for cylinder,
+// width otherwise) and H is fully derived. Old v2 data would mis-restore
+// cylinder mode and is intentionally ignored.
+const STORAGE_KEY = 'relief-riser-params-v3';
 const DEFAULT_MAX_HEIGHT = 0.4;
 
 const state = {
@@ -330,12 +765,26 @@ const state = {
   profilePoints: null,
   profileSource: null,
   profileFilename: null,
+  // Manual override for the relief band. When non-null, takes precedence
+  // over the auto detection driven by `outerBandFrac`. Stored as indices
+  // into `profilePoints`, so it MUST be cleared whenever a new profile is
+  // loaded — the indices would otherwise refer to wrong points.
+  profileBandManual: null,            // { startIdx, length } | null
+  profileBandPicking: null,           // { firstIdx } during a 2-click pick
+  // Target STL for the "stlWrap" shape. Loaded via the wrap-STL file picker
+  // and held in memory only — too large to persist through localStorage.
+  // wrapStlInfo caches the derived dimensions (max radius, axial height) we
+  // need to size the heightmap rasterization.
+  wrapStl: null,                      // { positions, triCount } | null
+  wrapStlFilename: null,
+  wrapStlSource: null,                // 'default' | 'user' | null
+  wrapStlInfo: null,                  // { maxR, height, triCount } | null
   // 4-point polygon mask in source-image pixel coords. Pixels outside the
   // polygon are replaced with the relief-zero fill color before rasterization,
   // so the rectangular border around a relief design doesn't end up in the
   // mesh. Always 0..4 entries; the mask is only applied when length === 4.
   cropPolygon: [],
-  cropDragIndex: -1
+  cropDragIndex: -1,
 };
 
 const viewer = new Viewer(els.viewport);
@@ -441,25 +890,31 @@ function updateShapeLabels() {
   const isPoly = state.shape === 'polygon';
   const isCyl  = state.shape === 'cylindrical';
   const isCustom = state.shape === 'customProfile';
+  const isStlWrap = state.shape === 'stlWrap';
   if (isCyl) {
-    els.plateWLabel.textContent = 'Image tile width (mm)';
+    els.plateWLabel.textContent = 'Radius R (mm)';
   } else if (isPoly) {
-    els.plateWLabel.textContent = 'Side width W';
+    els.plateWLabel.textContent = 'Side width W (mm)';
   } else {
-    els.plateWLabel.textContent = 'Width W';
+    els.plateWLabel.textContent = 'Width W (mm)';
   }
   els.sidesControl.classList.toggle('hidden', !isPoly);
-  els.closedBottomControl.classList.toggle('hidden', !(isPoly || isCyl));
+  els.closedBottomControl.classList.toggle('hidden', !(isPoly || isCyl || isStlWrap));
   els.chamferTopControl.classList.toggle('hidden', !isPoly);
   els.customProfileControls.classList.toggle('hidden', !isCustom);
-  // In custom profile mode the geometry is defined by the DXF + factors,
-  // so the plain plate W/H/baseThickness sliders are irrelevant.
+  if (els.stlWrapControls) els.stlWrapControls.classList.toggle('hidden', !isStlWrap);
+  // Custom-profile and STL-wrap modes both define the wrap geometry from
+  // their loaded file, so the plain plate W slider is irrelevant. The H
+  // control is permanently hidden — H is always derived. baseThickness is
+  // hidden only for custom profile (which doesn't use it); STL wrap still
+  // does (it controls the inner-shell offset).
   const plateCtl = els.plateW.closest('.control');
   const plateHCtl = els.plateH.closest('.control');
   const baseCtl = els.baseThickness.closest('.control');
-  if (plateCtl)  plateCtl.classList.toggle('hidden', isCustom);
-  if (plateHCtl) plateHCtl.classList.toggle('hidden', isCustom);
+  if (plateCtl)  plateCtl.classList.toggle('hidden', isCustom || isStlWrap);
+  if (plateHCtl) plateHCtl.classList.add('hidden');
   if (baseCtl)   baseCtl.classList.toggle('hidden', isCustom);
+  if (els.derivedDimsHint) els.derivedDimsHint.classList.toggle('hidden', isCustom || isStlWrap);
 }
 
 function updateResolutionVisibility() {
@@ -546,6 +1001,28 @@ function paintSourceWithOverlay() {
   const ctx = canvas.getContext('2d');
   ctx.drawImage(state.sourceCanvas, 0, 0);
 
+  // Crop-window indicator: when either fraction < 1, dim everything outside
+  // the cropped rect and outline it in orange. Drawn first so the polygon
+  // overlay (if any) renders on top.
+  const crop = currentCropRect();
+  if (crop.fX < 1 || crop.fY < 1) {
+    const zw = w * crop.fX;
+    const zh = h * crop.fY;
+    const zx = crop.oxFrac * w;
+    const zy = crop.oyFrac * h;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, w, h);
+    ctx.rect(zx, zy, zw, zh);
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    ctx.fill('evenodd');
+    ctx.strokeStyle = '#f5b042';
+    ctx.lineWidth = Math.max(1.5, Math.min(w, h) / 250);
+    ctx.setLineDash([Math.max(6, Math.min(w, h) / 60), Math.max(4, Math.min(w, h) / 90)]);
+    ctx.strokeRect(zx, zy, zw, zh);
+    ctx.restore();
+  }
+
   const poly = state.cropPolygon;
   if (!poly || poly.length === 0) return;
 
@@ -601,6 +1078,31 @@ function eventToSourceCoords(e) {
   return { x: sx, y: sy };
 }
 
+// Read the current crop window as fractions: { fX, fY, oxFrac, oyFrac }.
+// Each fraction is in (0, 1]; the offsets sit in [0, 1 - fraction], snapped
+// to whichever edge the alignment dropdowns pick (left/center/right · top/
+// center/bottom). Centralized so the overlay painter, persistence, and the
+// rasterize call all see the same numbers.
+function currentCropRect() {
+  const readFrac = (slider) => {
+    if (!slider) return 1;
+    const v = parseFloat(slider.value);
+    if (!Number.isFinite(v)) return 1;
+    return Math.max(0.01, Math.min(1, v / 100));
+  };
+  const fX = readFrac(els.zoomSliderX);
+  const fY = readFrac(els.zoomSliderY);
+  const offsetForAlign = (frac, alignVal, lowKey, highKey) => {
+    const max = Math.max(0, 1 - frac);
+    if (alignVal === lowKey) return 0;
+    if (alignVal === highKey) return max;
+    return max / 2;
+  };
+  const oxFrac = offsetForAlign(fX, els.alignX ? els.alignX.value : 'center', 'left', 'right');
+  const oyFrac = offsetForAlign(fY, els.alignY ? els.alignY.value : 'center', 'top', 'bottom');
+  return { fX, fY, oxFrac, oyFrac };
+}
+
 function findPolygonHandle(pt) {
   if (!state.sourceCanvas) return -1;
   const w = state.sourceCanvas.width;
@@ -645,25 +1147,32 @@ function getMaskedSourceCanvas(sourceCanvas, polygon, fillColor) {
 els.originalCanvas.addEventListener('pointerdown', (e) => {
   if (!state.sourceCanvas) return;
   const pt = eventToSourceCoords(e);
+
+  // Polygon-handle drag has top priority — handles are small, easily missed.
   const hit = findPolygonHandle(pt);
   if (hit >= 0) {
     state.cropDragIndex = hit;
-  } else if (state.cropPolygon.length < 4) {
+    els.originalCanvas.setPointerCapture(e.pointerId);
+    return;
+  }
+
+  // Polygon point placement (up to 4). The crop rect is positioned via the
+  // Align dropdowns, not by dragging it here.
+  if (state.cropPolygon.length < 4) {
     state.cropPolygon.push({ x: pt.x, y: pt.y });
     state.cropDragIndex = state.cropPolygon.length - 1;
     paintSourceWithOverlay();
     updateCropStatus();
     persist();
     if (state.cropPolygon.length === 4) onParamChange();
-    return;
-  } else {
-    return;
+    els.originalCanvas.setPointerCapture(e.pointerId);
   }
-  els.originalCanvas.setPointerCapture(e.pointerId);
 });
 
 els.originalCanvas.addEventListener('pointermove', (e) => {
-  if (state.cropDragIndex < 0 || !state.sourceCanvas) return;
+  if (!state.sourceCanvas) return;
+
+  if (state.cropDragIndex < 0) return;
   const pt = eventToSourceCoords(e);
   const w = state.sourceCanvas.width;
   const h = state.sourceCanvas.height;
@@ -695,36 +1204,118 @@ els.cropPolyClear.addEventListener('click', () => {
   onParamChange();
 });
 
-// Set plate H so one image tile preserves its native aspect ratio on the
-// shape: H = (per-tile width on the surface) × (imgH / imgW). For
-// rectangular plates and polygon prisms the per-tile width is W. For
-// cylinders W is now the image tile width (the diameter is derived from
-// W × tileX / π), so the per-tile width is also just W. Clamped + snapped
-// to the H slider's step. Called on image load and after the auto-crop
-// toggle changes.
-function autoFitHeightToImage() {
-  if (!state.sourceCanvas) return;
+// Single-knob sizing: only W is user-editable. H is derived so that each
+// stamped image tile preserves its native aspect ratio on the chosen shape.
+// Per-tile match: (tileWmm) / (tileHmm) = imgW / imgH.
+//
+// Rect / polygon: the heightmap covers the whole plate (or one face);
+// the image is stamped tileX × tileY across it, so
+//   plateH = plateW × (imgH / imgW) × (tileY / tileX).
+// Cylindrical: W is reinterpreted as the cylinder RADIUS (mm). The actual
+// per-tile arc width is plateW_arc = 2πR / tileX. The image is stamped
+// tileX times around the circumference and tileY along Z, so each tile is
+// (plateW_arc) × (plateH / tileY) and
+//   plateH = plateW_arc × (imgH / imgW) × tileY.
+// Returns null until a source image is available.
+function computeDerivedDims() {
+  if (!state.sourceCanvas) return null;
   const imgW = state.sourceCanvas.width;
   const imgH = state.sourceCanvas.height;
-  if (imgW <= 0 || imgH <= 0) return;
+  if (!(imgW > 0) || !(imgH > 0)) return null;
 
-  const plateW = parseFloat(els.plateW.value);
-  let h = plateW * (imgH / imgW);
+  const uiW = parseFloat(els.plateW.value);
+  if (!(uiW > 0)) return null;
+  const tileX = Math.max(1, parseInt(els.tileX.value, 10) || 1);
+  const tileY = Math.max(1, parseInt(els.tileY.value, 10) || 1);
 
-  const min = parseFloat(els.plateH.min);
-  const max = parseFloat(els.plateH.max);
-  const step = parseFloat(els.plateH.step) || 0.5;
-  h = Math.max(min, Math.min(max, h));
-  h = Math.round(h / step) * step;
+  if (state.shape === 'cylindrical') {
+    const radius = uiW;
+    const diameter = 2 * radius;
+    const circumference = 2 * Math.PI * radius;
+    const actualPlateW = circumference / tileX;
+    const plateH = actualPlateW * (imgH / imgW) * tileY;
+    return { actualPlateW, plateH, radius, diameter, circumference, tileX, tileY };
+  }
 
-  els.plateH.value = String(h);
-  els.plateHNum.value = String(h);
-  persist();
+  if (state.shape === 'stlWrap') {
+    if (!state.wrapStlInfo) return null;
+    const { maxR, height } = state.wrapStlInfo;
+    const circumference = 2 * Math.PI * maxR;
+    // Auto-fit tile count around: pick the integer tileX that makes each
+    // tile preserve the image's aspect ratio. Per-tile arc = C/tileX, axial
+    // height per Y-tile = H/tileY; we want (C/tileX) / (H/tileY) = imgW/imgH,
+    // so tileX = round(C × tileY × imgH / (H × imgW)). Integer = seamless
+    // wrap around the seam.
+    const autoTiles = !!els.wrapAutoTiles && !!els.wrapAutoTiles.checked;
+    let effectiveTileX = tileX;
+    if (autoTiles && height > 0) {
+      const ideal = (circumference * tileY * imgH) / (height * imgW);
+      effectiveTileX = Math.max(1, Math.min(60, Math.round(ideal) || 1));
+    }
+    const actualPlateW = circumference / effectiveTileX;
+    return {
+      actualPlateW,
+      plateH: height,
+      maxR,
+      circumference,
+      tileX: effectiveTileX,
+      tileY,
+      autoTileX: autoTiles ? effectiveTileX : null
+    };
+  }
+
+  const actualPlateW = uiW;
+  const plateH = actualPlateW * (imgH / imgW) * (tileY / tileX);
+  return { actualPlateW, plateH, tileX, tileY };
+}
+
+// Push the derived dimensions into the hidden plateH inputs (so the rest
+// of the pipeline reads them through readParamsFromUI) and update the hint
+// shown next to the W control. Safe to call when no image is loaded yet.
+function applyDerivedDims() {
+  const dims = computeDerivedDims();
+  if (!dims) {
+    if (els.derivedDimsHint) els.derivedDimsHint.textContent = '';
+    return;
+  }
+  // Write raw (unrounded) so the tile aspect is preserved exactly. The H
+  // slider's min/max are display-only — readParamsFromUI uses .value directly.
+  const hStr = String(dims.plateH);
+  els.plateH.value = hStr;
+  els.plateHNum.value = hStr;
+  if (!els.derivedDimsHint) return;
+  const fmt = (v) => v.toFixed(1);
+  if (state.shape === 'cylindrical') {
+    els.derivedDimsHint.textContent =
+      `→ diameter ${fmt(dims.diameter)} mm · height ${fmt(dims.plateH)} mm · per-tile arc ${fmt(dims.actualPlateW)} mm`;
+  } else if (state.shape === 'stlWrap') {
+    const tilePart = dims.autoTileX != null
+      ? ` · auto tiles X = ${dims.autoTileX}`
+      : '';
+    els.derivedDimsHint.textContent =
+      `→ max-R ${fmt(dims.maxR)} mm · height ${fmt(dims.plateH)} mm · per-tile arc ${fmt(dims.actualPlateW)} mm${tilePart}`;
+  } else {
+    els.derivedDimsHint.textContent = `→ height ${fmt(dims.plateH)} mm`;
+  }
 }
 
 // ---------- persistence ----------
 
 function readParamsFromUI() {
+  // The UI W slider means different things by shape: width for rect/poly,
+  // radius for cylinder. computeDerivedDims handles the conversion and
+  // returns the actual per-tile plateW the geometry pipeline expects, plus
+  // the derived plateH. Fall back to raw UI values if no image is loaded
+  // yet (e.g. initial render before a file lands).
+  const derived = computeDerivedDims();
+  const plateW = derived ? derived.actualPlateW : parseFloat(els.plateW.value);
+  const plateH = derived ? derived.plateH : parseFloat(els.plateH.value);
+  // In stlWrap + auto-fit mode, tileX is derived (so tiles wrap seamlessly
+  // and preserve image aspect). All other modes read it straight from the UI.
+  const uiTileX = parseInt(els.tileX.value, 10) || 1;
+  const effectiveTileX = (state.shape === 'stlWrap' && derived && derived.autoTileX != null)
+    ? derived.autoTileX
+    : uiTileX;
   return {
     brightness: parseFloat(els.brightness.value),
     contrast: parseFloat(els.contrast.value),
@@ -738,25 +1329,44 @@ function readParamsFromUI() {
     resolutionMode: state.resolutionMode,
     maxDim: parseInt(els.maxDim.value, 10),
     density: parseFloat(els.density.value),
-    tileX: parseInt(els.tileX.value, 10) || 1,
+    tileX: effectiveTileX,
+    // Persist the raw slider value too — on restore we want the slider back
+    // to the user's manual choice, not the auto-fit override.
+    uiTileX,
     tileY: parseInt(els.tileY.value, 10) || 1,
     marginX: parseFloat(els.marginX.value) || 0,
     marginY: parseFloat(els.marginY.value) || 0,
+    gradFrameTop:    parseFloat(els.gradFrameTop.value)    || 0,
+    gradFrameBottom: parseFloat(els.gradFrameBottom.value) || 0,
+    gradFrameLeft:   parseFloat(els.gradFrameLeft.value)   || 0,
+    gradFrameRight:  parseFloat(els.gradFrameRight.value)  || 0,
+    interpX:         els.interpX.checked,
+    interpY:         els.interpY.checked,
+    interpWidth:     parseFloat(els.interpWidth.value) || 10,
 
-    plateW: parseFloat(els.plateW.value),
-    plateH: parseFloat(els.plateH.value),
+    plateW,
+    plateH,
+    // The raw UI W slider value (radius for cylinder, width otherwise).
+    // Persisted separately from `plateW` so the slider can be restored to
+    // exactly what the user set, not the shape-converted per-tile arc.
+    uiPlateW: parseFloat(els.plateW.value),
     baseThickness: parseFloat(els.baseThickness.value),
     mapDir: els.mapDir.value,
     fitMode: els.fitMode.value,
     shape: state.shape,
     sides: parseInt(els.sides.value, 10) || 4,
     closedBottom: els.closedBottom.checked,
+    wrapAutoTiles: els.wrapAutoTiles.checked,
     chamferTop: parseFloat(els.chamferTop.value) || 0,
     radiusFactor: parseFloat(els.radiusFactor.value) || 1,
     heightFactor: parseFloat(els.heightFactor.value) || 1,
     outerBandFrac: parseFloat(els.outerBandFrac.value) || 50,
     autoCrop: state.autoCrop,
     rotation: state.rotation,
+    zoomX: parseFloat(els.zoomSliderX.value) / 100 || 1,
+    zoomY: parseFloat(els.zoomSliderY.value) / 100 || 1,
+    alignX: els.alignX.value,
+    alignY: els.alignY.value,
     stlSide: state.stlSide,
     stlRenderSize: parseInt(els.stlRenderSize.value, 10) || STL_RENDER_MAX_DIM_DEFAULT,
     display: { ...state.display },
@@ -788,12 +1398,21 @@ function writeParamsToUI(p) {
   setNum('heightFactor', 'heightFactorNum', p.heightFactor);
   setNum('outerBandFrac', 'outerBandFracNum', p.outerBandFrac);
   setNum('stlRenderSize', 'stlRenderSizeNum', p.stlRenderSize);
-  setNum('tileX', 'tileXNum', p.tileX);
+  setNum('tileX', 'tileXNum', p.uiTileX != null ? p.uiTileX : p.tileX);
   setNum('tileY', 'tileYNum', p.tileY);
   setNum('marginX', 'marginXNum', p.marginX);
   setNum('marginY', 'marginYNum', p.marginY);
-  setNum('plateW', 'plateWNum', p.plateW);
-  setNum('plateH', 'plateHNum', p.plateH);
+  setNum('gradFrameTop',    'gradFrameTopNum',    p.gradFrameTop);
+  setNum('gradFrameBottom', 'gradFrameBottomNum', p.gradFrameBottom);
+  setNum('gradFrameLeft',   'gradFrameLeftNum',   p.gradFrameLeft);
+  setNum('gradFrameRight',  'gradFrameRightNum',  p.gradFrameRight);
+  setNum('interpWidth',     'interpWidthNum',     p.interpWidth);
+  if (p.interpX != null) els.interpX.checked = !!p.interpX;
+  if (p.interpY != null) els.interpY.checked = !!p.interpY;
+  // Restore the raw slider value (radius or width depending on shape).
+  // p.plateW (the converted per-tile arc) is intentionally ignored — it
+  // would be wrong to feed back into a slider whose meaning depends on shape.
+  setNum('plateW', 'plateWNum', p.uiPlateW != null ? p.uiPlateW : p.plateW);
   setNum('baseThickness', 'baseThicknessNum', p.baseThickness);
   if (p.invert != null) els.invert.checked = !!p.invert;
   if (p.mapDir) els.mapDir.value = p.mapDir;
@@ -816,11 +1435,12 @@ function writeParamsToUI(p) {
     state.layerHeights = p.layerHeights.slice();
     while (state.layerHeights.length < state.colorCount) state.layerHeights.push(0);
   }
-  if (p.shape === 'rectangular' || p.shape === 'cylindrical' || p.shape === 'polygon' || p.shape === 'customProfile') {
+  if (p.shape === 'rectangular' || p.shape === 'cylindrical' || p.shape === 'polygon' || p.shape === 'customProfile' || p.shape === 'stlWrap') {
     state.shape = p.shape;
     els.shape.value = p.shape;
   }
   if (p.closedBottom != null) els.closedBottom.checked = !!p.closedBottom;
+  if (p.wrapAutoTiles != null) els.wrapAutoTiles.checked = !!p.wrapAutoTiles;
   if (p.autoCrop != null) {
     state.autoCrop = !!p.autoCrop;
     els.autoCrop.checked = state.autoCrop;
@@ -830,6 +1450,39 @@ function writeParamsToUI(p) {
     state.rotation = (r === 0 || r === 90 || r === 180 || r === 270) ? r : 0;
     els.rotation.value = String(state.rotation);
   }
+  // Back-compat: older saves had `imageZoom` (square) + free-drag offsets.
+  // Map those into the new fields — same numeric fraction on both axes; pick
+  // the alignment closest to the saved offset on each axis (left/right/center).
+  const restoreFrac = (val, fallback) => {
+    if (val == null) return fallback;
+    const f = parseFloat(val);
+    if (!Number.isFinite(f)) return fallback;
+    return Math.max(0.05, Math.min(1, f));
+  };
+  const alignFromOffset = (offset, frac, lowKey, highKey) => {
+    if (offset == null) return 'center';
+    const maxOff = Math.max(0, 1 - frac);
+    const o = Math.max(0, Math.min(maxOff, parseFloat(offset) || 0));
+    if (maxOff < 1e-6) return 'center';
+    if (o < maxOff * 0.25) return lowKey;
+    if (o > maxOff * 0.75) return highKey;
+    return 'center';
+  };
+  const fX = restoreFrac(p.zoomX != null ? p.zoomX : p.imageZoom, 1);
+  const fY = restoreFrac(p.zoomY != null ? p.zoomY : p.imageZoom, 1);
+  const setPct = (slider, num, frac) => {
+    const pct = String(+(frac * 100).toFixed(1));
+    slider.value = pct;
+    if (num) num.value = pct;
+  };
+  setPct(els.zoomSliderX, els.zoomSliderXNum, fX);
+  setPct(els.zoomSliderY, els.zoomSliderYNum, fY);
+  els.alignX.value = (p.alignX === 'left' || p.alignX === 'center' || p.alignX === 'right')
+    ? p.alignX
+    : alignFromOffset(p.zoomOffsetX, fX, 'left', 'right');
+  els.alignY.value = (p.alignY === 'top' || p.alignY === 'center' || p.alignY === 'bottom')
+    ? p.alignY
+    : alignFromOffset(p.zoomOffsetY, fY, 'top', 'bottom');
   if (typeof p.stlSide === 'string' && p.stlSide in { front:1, back:1, left:1, right:1, top:1, bottom:1 }) {
     state.stlSide = p.stlSide;
     els.stlSide.value = p.stlSide;
@@ -867,10 +1520,14 @@ renderLayerHeights();
 updateThresholdVisibility();
 updateShapeLabels();
 updateResolutionVisibility();
+applyDerivedDims();
 els.asciiSTL.addEventListener('change', persist);
 
 if (state.shape === 'customProfile') {
   loadDefaultProfile();
+}
+if (state.shape === 'stlWrap') {
+  loadDefaultWrapStl();
 }
 
 // ---------- file input ----------
@@ -940,7 +1597,7 @@ async function handleFile(file) {
     updateStlControlsVisibility();
     applyRotation();
     applyAutoCrop();
-    autoFitHeightToImage();
+    applyDerivedDims();
     setExportEnabled(false);
     triggerProcessing(true);
   } catch (err) {
@@ -956,7 +1613,7 @@ function rerenderStlDepth() {
     state.lastStlRenderSize = size;
     applyRotation();
     applyAutoCrop();
-    autoFitHeightToImage();
+    applyDerivedDims();
     triggerProcessing(true);
   } catch (err) {
     showWarning('STL projection failed: ' + err.message, true);
@@ -975,7 +1632,7 @@ function maybeReprojectStl() {
     state.lastStlRenderSize = size;
     applyRotation();
     applyAutoCrop();
-    autoFitHeightToImage();
+    applyDerivedDims();
     return true;
   } catch (err) {
     showWarning('STL projection failed: ' + err.message, true);
@@ -1083,6 +1740,10 @@ const TRI_HARD_LIMIT = 2_000_000;
 let processTimer = null;
 
 function onParamChange() {
+  // Refresh derived plateH from current W / tileX / tileY / shape before
+  // anything reads readParamsFromUI(). Cheap enough to run on every change.
+  applyDerivedDims();
+  if (state.shape === 'customProfile') drawProfilePreview();
   persist();
   triggerProcessing(false);
 }
@@ -1104,7 +1765,7 @@ function getTargetDims(params) {
     // aspect (circumference/tileX) / bandLength.
     w = dims.circumference;
     h = dims.bandLength;
-  } else if (params.shape === 'cylindrical') {
+  } else if (params.shape === 'cylindrical' || params.shape === 'stlWrap') {
     w = params.plateW * params.tileX;
     h = params.plateH;
   } else {
@@ -1129,27 +1790,30 @@ function customProfileDims(params) {
   const rf = params.radiusFactor || 1;
   const hf = params.heightFactor || 1;
   const scaled = state.profilePoints.map(([x, y]) => [x * rf, y * hf]);
-  let maxX = -Infinity, minX = Infinity;
-  for (const p of scaled) {
-    if (p[0] > maxX) maxX = p[0];
-    if (p[0] < minX) minX = p[0];
-  }
-  const eps = (maxX - minX) * Math.max(0.01, Math.min(1, (params.outerBandFrac || 50) / 100));
-  const band = findOuterBand(scaled, eps);
+  const band = selectBand(scaled, params.outerBandFrac || 50);
   if (band.length < 2) return null;
-  // Arc length of the outer band slice
+  // Walk the band once to get both its arc length and its own max radius.
+  // The circumference reference for the rasterized image is the band's max
+  // radius (not the profile's), so a manually-picked inner band gets a
+  // correctly-sized heightmap rather than one stretched for an outer ring
+  // that isn't actually receiving the relief.
   let bandLength = 0;
-  for (let k = 0; k < band.length - 1; k++) {
+  let bandMaxX = -Infinity;
+  for (let k = 0; k < band.length; k++) {
     const a = scaled[(band.startIdx + k) % scaled.length];
-    const b = scaled[(band.startIdx + k + 1) % scaled.length];
-    bandLength += Math.hypot(b[0] - a[0], b[1] - a[1]);
+    if (a[0] > bandMaxX) bandMaxX = a[0];
+    if (k < band.length - 1) {
+      const b = scaled[(band.startIdx + k + 1) % scaled.length];
+      bandLength += Math.hypot(b[0] - a[0], b[1] - a[1]);
+    }
   }
-  const circumference = 2 * Math.PI * maxX;
-  return { circumference, bandLength, scaled, band, maxR: maxX };
+  const circumference = 2 * Math.PI * bandMaxX;
+  return { circumference, bandLength, scaled, band, maxR: bandMaxX };
 }
 
 function estimateTrisForShape(targetW, targetH, shape, sides, hasChamfer, profileLen) {
   if (shape === 'cylindrical') return estimateCylindricalTriangleCount(targetW, targetH);
+  if (shape === 'stlWrap') return estimateSTLWrapTriangleCount(targetW, targetH);
   if (shape === 'polygon') return estimatePolygonPrismTriangleCount(sides, targetW, targetH, hasChamfer);
   if (shape === 'customProfile') {
     // After splicing the outer band (length Ny) into the profile (originally
@@ -1236,6 +1900,14 @@ function regeneratePreview() {
   } else if (params.shape === 'cylindrical') {
     baseW = params.plateW * params.tileX;
     baseH = params.plateH;
+  } else if (params.shape === 'stlWrap') {
+    if (!state.wrapStl || !state.wrapStlInfo) {
+      showWarning('Load a target STL first.', false);
+      setExportEnabled(false);
+      return false;
+    }
+    baseW = params.plateW * params.tileX;
+    baseH = params.plateH;
   } else {
     baseW = params.plateW;
     baseH = params.plateH;
@@ -1255,11 +1927,22 @@ function regeneratePreview() {
   const sourceForRaster = state.cropPolygon.length === 4
     ? getMaskedSourceCanvas(state.sourceCanvas, state.cropPolygon, fillColor)
     : state.sourceCanvas;
-  const raster = rasterize(sourceForRaster, targetW, targetH, params.fitMode, {
+  // Crop step: take the (zoomX × zoomY) sub-rectangle of the source, snapped
+  // to the chosen alignment (left/center/right · top/center/bottom). The
+  // rasterizer then fits that region into the heightmap target, dropping the
+  // unselected side. Runs after the polygon mask so the mask still applies
+  // in source pixel space (visible via the orange crop overlay).
+  const crop = currentCropRect();
+  const zoomedForRaster = (crop.fX < 1 || crop.fY < 1)
+    ? subRectCanvas(sourceForRaster, crop.fX, crop.fY, crop.oxFrac, crop.oyFrac)
+    : sourceForRaster;
+  const marginPxX = Math.round(params.marginX * pxPerMmX);
+  const marginPxY = Math.round(params.marginY * pxPerMmY);
+  const raster = rasterize(zoomedForRaster, targetW, targetH, params.fitMode, {
     tileX: params.tileX,
     tileY: params.tileY,
-    marginPxX: Math.round(params.marginX * pxPerMmX),
-    marginPxY: Math.round(params.marginY * pxPerMmY),
+    marginPxX,
+    marginPxY,
     fillColor,
     // Closed revolved surfaces: each tile must literally cover its share of
     // the circumference, so fit each tile in its own box rather than fitting
@@ -1275,7 +1958,18 @@ function regeneratePreview() {
     threshold: params.threshold,
     blackPoint: params.blackPoint,
     whitePoint: params.whitePoint,
-    colorCount: params.colorCount
+    colorCount: params.colorCount,
+    gradFrameTop: params.gradFrameTop,
+    gradFrameBottom: params.gradFrameBottom,
+    gradFrameLeft: params.gradFrameLeft,
+    gradFrameRight: params.gradFrameRight,
+    interpX: params.interpX,
+    interpY: params.interpY,
+    interpWidth: params.interpWidth,
+    tileX: params.tileX,
+    tileY: params.tileY,
+    marginPxX,
+    marginPxY
   });
   state.processed = processed;
   paintProcessedCanvas(processed);
@@ -1328,6 +2022,17 @@ function regenerateMesh() {
         sides: params.sides,
         closedBottom: params.closedBottom,
         chamferTop: params.chamferTop
+      });
+    } else if (params.shape === 'stlWrap') {
+      if (!state.wrapStl) {
+        showWarning('Load a target STL first.', false);
+        setExportEnabled(false);
+        return;
+      }
+      geom = buildSTLWrapGeometry(heightmap, {
+        stl: state.wrapStl,
+        baseThickness: params.baseThickness,
+        closedBottom: params.closedBottom
       });
     } else if (params.shape === 'customProfile') {
       // Resample the outer band to exactly Ny points (one per heightmap row),
@@ -1456,6 +2161,12 @@ function exportFilename(ext, params) {
       ? state.profileFilename.replace(/\.[^.]+$/, '').replace(/[^A-Za-z0-9_-]+/g, '_')
       : 'profile';
     return `${name}_${profileTag}_r${rf}xh${hf}_h${f}mm${c}.${ext}`;
+  }
+  if (params.shape === 'stlWrap') {
+    const wrapTag = state.wrapStlFilename
+      ? state.wrapStlFilename.replace(/\.[^.]+$/, '').replace(/[^A-Za-z0-9_-]+/g, '_')
+      : 'wrap';
+    return `${name}_on_${wrapTag}_h${f}mm${c}.${ext}`;
   }
   return `${name}_${W}x${H}_h${f}mm${c}.${ext}`;
 }

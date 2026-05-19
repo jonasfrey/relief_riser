@@ -7,10 +7,13 @@ import {
   buildCylindricalGeometry,
   buildPolygonPrismGeometry,
   buildCustomProfileGeometry,
+  buildSTLWrapGeometry,
+  computeSTLRadiusField,
   estimateTriangleCount,
   estimateCylindricalTriangleCount,
   estimatePolygonPrismTriangleCount,
-  estimateCustomProfileTriangleCount
+  estimateCustomProfileTriangleCount,
+  estimateSTLWrapTriangleCount
 } from '../src/geometry.js';
 import { findOuterBand, resampleSlice, spliceSlice, parseDxfProfile } from '../src/dxfReader.js';
 import { readFileSync } from 'node:fs';
@@ -397,6 +400,135 @@ checkPoly(4, 6, 6, polyChamferOpts);
 checkPoly(6, 8, 8, polyChamferOpts);
 checkPoly(4, 12, 12, { ...polyChamferOpts, closedBottom: false });
 checkPoly(8, 16, 12, polyChamferOpts, (i, j) => 0.4 * Math.sin(i * 0.3) * Math.cos(j * 0.4));
+
+// ---- STL wrap mesh checks (cylindrical wrap around a custom STL) ----
+
+// Build a synthetic cylindrical STL of radius R and height H, axis = Z,
+// centered on origin in XY, z from 0..H. Returns { positions, triCount }.
+// Triangulation: Nside vertical strips on the side wall + one triangle-fan
+// disc on each cap. Closed by construction.
+function makeCylinderSTL(R, H, Nside) {
+  const tris = [];
+  const ring = (z) => {
+    const out = [];
+    for (let k = 0; k < Nside; k++) {
+      const t = (k / Nside) * 2 * Math.PI;
+      out.push([R * Math.cos(t), R * Math.sin(t), z]);
+    }
+    return out;
+  };
+  const bottom = ring(0);
+  const top = ring(H);
+  for (let k = 0; k < Nside; k++) {
+    const k1 = (k + 1) % Nside;
+    tris.push([bottom[k], bottom[k1], top[k1]]);
+    tris.push([bottom[k], top[k1], top[k]]);
+  }
+  const bc = [0, 0, 0];
+  for (let k = 0; k < Nside; k++) {
+    const k1 = (k + 1) % Nside;
+    tris.push([bc, bottom[k1], bottom[k]]);
+  }
+  const tc = [0, 0, H];
+  for (let k = 0; k < Nside; k++) {
+    const k1 = (k + 1) % Nside;
+    tris.push([tc, top[k], top[k1]]);
+  }
+  const positions = new Float32Array(tris.length * 9);
+  for (let t = 0; t < tris.length; t++) {
+    for (let v = 0; v < 3; v++) {
+      const p = tris[t][v];
+      positions[t * 9 + v * 3]     = p[0];
+      positions[t * 9 + v * 3 + 1] = p[1];
+      positions[t * 9 + v * 3 + 2] = p[2];
+    }
+  }
+  return { positions, triCount: tris.length };
+}
+
+// Sanity check the radius field on a perfect cylinder: R(θ, z) ≈ R for all
+// (θ, z) samples in the body.
+{
+  const Rcyl = 12, Hcyl = 30;
+  const stl = makeCylinderSTL(Rcyl, Hcyl, 60);
+  const Nx = 48, Ny = 16;
+  const eps = Hcyl * 1e-4;
+  const field = computeSTLRadiusField(stl, Nx, Ny, eps, Hcyl - eps);
+  let minR = Infinity, maxR = -Infinity, sumR = 0, hits = 0;
+  for (let i = 0; i < field.length; i++) {
+    if (field[i] > 0) { sumR += field[i]; hits++; if (field[i] < minR) minR = field[i]; if (field[i] > maxR) maxR = field[i]; }
+  }
+  const meanR = hits > 0 ? sumR / hits : 0;
+  const cov = hits / field.length;
+  console.log(`stlwrap field cylinder: hits=${hits}/${field.length} cov=${(cov*100).toFixed(1)}% R∈[${minR.toFixed(3)}, ${maxR.toFixed(3)}] mean=${meanR.toFixed(3)} (expected ${Rcyl})`);
+  if (cov < 0.99) throw new Error(`radius field coverage too low: ${(cov*100).toFixed(1)}%`);
+  if (Math.abs(meanR - Rcyl) > Rcyl * 0.005) {
+    throw new Error(`radius field mean drifted: got ${meanR.toFixed(3)}, expected ${Rcyl}`);
+  }
+}
+
+function checkSTLWrapNormals(geom, opts) {
+  return checkCylinderNormals(geom, { height: geom.stlHeight, ...opts });
+}
+
+function checkSTLWrap(Nx, Ny, stl, opts, fillFn) {
+  const data = new Float32Array(Nx * Ny);
+  for (let j = 0; j < Ny; j++) for (let i = 0; i < Nx; i++) {
+    data[i + j * Nx] = fillFn ? fillFn(i, j) : 0.3 * (((i + j) & 1) ? 1 : 0);
+  }
+  const geom = buildSTLWrapGeometry({ data, width: Nx, height: Ny }, { ...opts, stl });
+  const expected = estimateSTLWrapTriangleCount(Nx, Ny);
+  if (geom.triCount !== expected) {
+    throw new Error(`stlwrap tri count mismatch: ${geom.triCount} vs ${expected}`);
+  }
+  const m = checkManifold(geom);
+  const bad = checkSTLWrapNormals(geom, opts);
+  const euler = geom.vertCount - m.uniqueEdges + m.triCount;
+  const expectedEuler = opts.closedBottom === false ? 0 : 2;
+  const tag = opts.closedBottom === false ? 'open' : 'closed';
+  console.log(
+    `stlwrap ${tag} ${Nx}x${Ny}: V=${geom.vertCount} E=${m.uniqueEdges} F=${m.triCount} ` +
+    `nonManifold=${m.nonManifold} boundary=${m.boundary} χ=${euler} badNormals=${bad} ` +
+    `maxR=${geom.stlMaxR.toFixed(3)} H=${geom.stlHeight.toFixed(3)}`
+  );
+  if (m.nonManifold !== 0) throw new Error('stlwrap: non-manifold edges');
+  if (m.boundary !== 0) throw new Error('stlwrap: boundary edges (not watertight)');
+  if (euler !== expectedEuler) throw new Error(`stlwrap: expected χ=${expectedEuler} got ${euler}`);
+  if (bad !== 0) throw new Error('stlwrap: wrong-direction normals');
+}
+
+{
+  const stl = makeCylinderSTL(15, 40, 80);
+  const baseOpts = { baseThickness: 1.5 };
+  checkSTLWrap(16, 8,  stl, { ...baseOpts });
+  checkSTLWrap(32, 12, stl, { ...baseOpts });
+  checkSTLWrap(64, 16, stl, { ...baseOpts }, (i, j) => 0.5 * Math.sin(i * 0.3) * Math.cos(j * 0.4));
+  checkSTLWrap(16, 8,  stl, { ...baseOpts, closedBottom: false });
+  checkSTLWrap(64, 16, stl, { ...baseOpts, closedBottom: false });
+}
+
+// Off-center STL: cylinder centered at (10, 5). The wrap mode should center
+// it on the Z axis automatically before sampling, so it still wraps cleanly.
+{
+  const stl = makeCylinderSTL(12, 25, 60);
+  for (let i = 0; i < stl.positions.length; i += 3) {
+    stl.positions[i]     += 10;
+    stl.positions[i + 1] += 5;
+  }
+  checkSTLWrap(48, 12, stl, { baseThickness: 1.0 });
+}
+
+// Reject wrap target whose smallest cross-section is thinner than baseThickness.
+try {
+  const stl = makeCylinderSTL(2, 20, 40);
+  buildSTLWrapGeometry({ data: new Float32Array(16 * 6), width: 16, height: 6 }, {
+    stl, baseThickness: 5
+  });
+  throw new Error('expected throw for B >= min STL radius');
+} catch (e) {
+  if (!/Base thickness/.test(e.message)) throw e;
+  console.log('stlwrap: rejects B >= min STL radius ✓');
+}
 
 // ---- custom-profile (revolved DXF) mesh checks ----
 

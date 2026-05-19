@@ -59,6 +59,34 @@
               <option value="270">270° CW (90° CCW)</option>
             </select>
           </div>
+          <h3 style="margin-top:0.4rem;">Image crop</h3>
+          <div class="control">
+            <label for="zoomSliderX">Zoom X (%)</label>
+            <input type="range" id="zoomSliderX" min="5" max="100" step="0.5" value="100" />
+            <input type="number" id="zoomSliderXNum" min="5" max="100" step="0.5" value="100" />
+          </div>
+          <div class="control">
+            <label for="zoomSliderY">Zoom Y (%)</label>
+            <input type="range" id="zoomSliderY" min="5" max="100" step="0.5" value="100" />
+            <input type="number" id="zoomSliderYNum" min="5" max="100" step="0.5" value="100" />
+          </div>
+          <div class="control">
+            <label for="alignX">Align X</label>
+            <select id="alignX">
+              <option value="left">Left</option>
+              <option value="center" selected>Center</option>
+              <option value="right">Right</option>
+            </select>
+          </div>
+          <div class="control">
+            <label for="alignY">Align Y</label>
+            <select id="alignY">
+              <option value="top">Top</option>
+              <option value="center" selected>Center</option>
+              <option value="bottom">Bottom</option>
+            </select>
+          </div>
+          <p class="hint">Sliders pick how much of each axis to keep; dropdowns snap that window left/center/right and top/center/bottom. The orange rectangle on the source preview shows the resulting crop.</p>
           <div class="preview-pair">
             <div>
               <h3>Source <span id="cropBadge" class="badge hidden">cropped</span></h3>
@@ -70,6 +98,9 @@
               <p class="hint">Click the source to place up to 4 corners. Drag a corner to adjust. When all 4 are set, only pixels inside the polygon become relief.</p>
             </div>
           </div>
+        </div>
+
+        <div class="panel preview-sticky">
           <div class="preview-large">
             <h3>Processed (heightmap)</h3>
             <canvas id="processedCanvas" class="img-preview img-preview-large"></canvas>
@@ -163,18 +194,60 @@
 
           <p class="hint">Higher resolution = more detail, larger STL, slower preview.</p>
 
+          <h3 style="margin-top:0.8rem;">Gradient frame</h3>
+          <p class="hint">Black-to-transparent overlay along each edge, fading to no effect over the given thickness. Mixes into the heightmap to chamfer the top of the relief. Set 0 to disable an edge.</p>
+
+          <div class="control">
+            <label for="gradFrameTop">Top thickness (% of image height)</label>
+            <input type="range" id="gradFrameTop" min="0" max="50" step="0.5" value="5" />
+            <input type="number" id="gradFrameTopNum" min="0" max="50" step="0.5" value="5" />
+          </div>
+
+          <div class="control">
+            <label for="gradFrameBottom">Bottom thickness (% of image height)</label>
+            <input type="range" id="gradFrameBottom" min="0" max="50" step="0.5" value="0" />
+            <input type="number" id="gradFrameBottomNum" min="0" max="50" step="0.5" value="0" />
+          </div>
+
+          <div class="control">
+            <label for="gradFrameLeft">Left thickness (% of image width)</label>
+            <input type="range" id="gradFrameLeft" min="0" max="50" step="0.5" value="0" />
+            <input type="number" id="gradFrameLeftNum" min="0" max="50" step="0.5" value="0" />
+          </div>
+
+          <div class="control">
+            <label for="gradFrameRight">Right thickness (% of image width)</label>
+            <input type="range" id="gradFrameRight" min="0" max="50" step="0.5" value="0" />
+            <input type="number" id="gradFrameRightNum" min="0" max="50" step="0.5" value="0" />
+          </div>
+
+          <h3 style="margin-top:0.8rem;">Edge blending</h3>
+          <p class="hint">Cross-fades opposing edges of the heightmap into each other so the wrap-around seam in cylindrical / custom-profile shapes (and tile boundaries) blends away. Blend width is shared between the two axes.</p>
+
+          <div class="control inline">
+            <label><input type="checkbox" id="interpX" /> Interpolate X edges (hides circumferential seam)</label>
+          </div>
+          <div class="control inline">
+            <label><input type="checkbox" id="interpY" /> Interpolate Y edges</label>
+          </div>
+          <div class="control">
+            <label for="interpWidth">Blend width (% of relevant dimension)</label>
+            <input type="range" id="interpWidth" min="1" max="50" step="0.5" value="10" />
+            <input type="number" id="interpWidthNum" min="1" max="50" step="0.5" value="10" />
+          </div>
+
           <h3 style="margin-top:0.8rem;">Tiling &amp; margin</h3>
 
           <div class="control">
             <label for="tileX">Repeat X</label>
-            <input type="range" id="tileX" min="1" max="10" step="1" value="1" />
-            <input type="number" id="tileXNum" min="1" max="10" step="1" value="1" />
+            <input type="range" id="tileX" min="1" max="30" step="1" value="1" />
+            <input type="number" id="tileXNum" min="1" max="30" step="1" value="1" />
           </div>
 
           <div class="control">
             <label for="tileY">Repeat Y</label>
-            <input type="range" id="tileY" min="1" max="10" step="1" value="1" />
-            <input type="number" id="tileYNum" min="1" max="10" step="1" value="1" />
+            <input type="range" id="tileY" min="1" max="30" step="1" value="1" />
+            <input type="number" id="tileYNum" min="1" max="30" step="1" value="1" />
           </div>
 
           <div class="control">
@@ -217,7 +290,29 @@
               <option value="cylindrical">Cylindrical (image wraps around)</option>
               <option value="polygon">Polygon prism (same image on each side)</option>
               <option value="customProfile">Custom profile (revolved DXF)</option>
+              <option value="stlWrap">Custom STL wrap (relief on outer surface)</option>
             </select>
+          </div>
+
+          <div class="hidden" id="stlWrapControls">
+            <div class="control">
+              <label for="wrapStlFile">Target STL</label>
+              <div style="display:flex;gap:0.4rem;align-items:center;">
+                <label class="btn">
+                  Choose .stl…
+                  <input type="file" id="wrapStlFile" accept=".stl,model/stl" hidden />
+                </label>
+                <button id="wrapStlResetBtn" class="btn" type="button">Use default</button>
+              </div>
+              <div id="wrapStlStatus" class="hint">No target STL loaded</div>
+            </div>
+            <div class="control inline">
+              <label>
+                <input type="checkbox" id="wrapAutoTiles" checked />
+                Auto-fit tile count around STL (preserve image aspect, seamless)
+              </label>
+            </div>
+            <p class="hint">The image wraps around the STL's outer surface using cylindrical projection along its Z axis. The STL should enclose its Z axis (e.g. a vase shape — centered on its own XY bounding box). The W slider is ignored: circumference and height come from the STL bounding box. With auto-fit on, "Repeat X" is derived so tiles preserve the image aspect ratio while staying integer (= seamless around the circumference); only "Repeat Y" remains user-controlled.</p>
           </div>
 
           <div class="hidden" id="customProfileControls">
@@ -231,6 +326,14 @@
                 <button id="profileResetBtn" class="btn" type="button">Use default</button>
               </div>
               <div id="profileStatus" class="hint">No profile loaded</div>
+              <canvas id="profilePreview" class="profile-preview"></canvas>
+              <div class="profile-band-controls">
+                <span id="profileBandMode" class="hint">Band: auto · click profile to pick manually</span>
+                <span class="profile-band-buttons">
+                  <button id="profileBandFlip" type="button" class="btn hidden">Flip</button>
+                  <button id="profileBandReset" type="button" class="btn hidden">Use auto</button>
+                </span>
+              </div>
             </div>
             <div class="control">
               <label for="radiusFactor">Radius factor (× DXF X)</label>
@@ -274,8 +377,9 @@
             <input type="range" id="plateW" min="5" max="300" step="0.5" value="18" />
             <input type="number" id="plateWNum" min="5" max="300" step="0.5" value="18" />
           </div>
+          <p class="hint" id="derivedDimsHint"></p>
 
-          <div class="control">
+          <div class="control hidden">
             <label for="plateH">Height H</label>
             <input type="range" id="plateH" min="5" max="300" step="0.5" value="18" />
             <input type="number" id="plateHNum" min="5" max="300" step="0.5" value="18" />
