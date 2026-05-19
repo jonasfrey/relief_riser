@@ -1122,12 +1122,12 @@ export function buildSTLWrapGeometry(heightmap, opts) {
 // the polar radial direction. Pixel column 0 → θ=0 (+X), columns wrap CCW.
 // Image rows go top→bottom and map to Z=H → Z=0 (like the cylinder).
 //
-// Bottom hole: a smaller similar ellipse with axes (aIn·p, bIn·p) where
-// p = bottomHolePct/100. p=0 gives a closed floor (solid disc at z=0 plus a
-// sealed inner-floor disc at z=B). p=100 gives a fully open bottom (annular
+// opts.bottomThickness (BF): Z height of the inner floor (separate from the
+// side-wall thickness B). p=0 gives a closed floor (solid disc at z=0 plus a
+// sealed inner-floor disc at z=BF). p=100 gives a fully open bottom (annular
 // outer→inner ring at z=0). Intermediate p creates an actual hole: annular
-// outer→hole at z=0, vertical hole walls from z=0 to z=B, annular hole→inner
-// floor at z=B sealing the cavity around the hole.
+// outer→hole at z=0, vertical hole walls from z=0 to z=BF, annular
+// hole→inner floor at z=BF sealing the cavity around the hole.
 //
 // Columns are spaced by arc length, not angle, so the image wraps the
 // perimeter at uniform stretch even when xSize ≠ ySize.
@@ -1141,6 +1141,7 @@ export function buildEllipseGeometry(heightmap, opts) {
   const ySize = opts.ySize;
   const B = opts.thickness;
   const H = opts.height;
+  const BF = opts.bottomThickness !== undefined ? opts.bottomThickness : B;
   const holePct = Math.max(0, Math.min(100, opts.bottomHolePct || 0));
   const aIn = xSize / 2;   // inner cavity half-axes (user's x/y)
   const bIn = ySize / 2;
@@ -1151,6 +1152,12 @@ export function buildEllipseGeometry(heightmap, opts) {
   }
   if (B >= H) {
     throw new Error('Outside thickness must be smaller than extrusion height');
+  }
+  if (!(BF > 0)) {
+    throw new Error('Bottom thickness must be positive');
+  }
+  if (BF >= H) {
+    throw new Error('Bottom thickness must be smaller than extrusion height');
   }
 
   // Arc-length parameterization: integrate |dP/dθ| = √(a²sin²θ + b²cos²θ)
