@@ -1196,9 +1196,9 @@ export function buildEllipseGeometry(heightmap, opts) {
   const holeAx = aIn * (holePct / 100);
   const holeBx = bIn * (holePct / 100);
   // Inner-surface Z range: when the bottom is fully open the inner cavity
-  // continues all the way down to z=0 (no floor); otherwise it stops at z=B
+  // continues all the way down to z=0 (no floor); otherwise it stops at z=BF
   // where the floor (or hole floor annulus) seals it.
-  const innerZBottom = fullHole ? 0 : B;
+  const innerZBottom = fullHole ? 0 : BF;
 
   let extraVerts = 0;
   if (!hasHole) extraVerts += 2;             // disc center + floor center
@@ -1246,7 +1246,7 @@ export function buildEllipseGeometry(heightmap, opts) {
     positions[bottomCenter * 3 + 2] = 0;
     positions[floorCenter * 3]      = 0;
     positions[floorCenter * 3 + 1]  = 0;
-    positions[floorCenter * 3 + 2]  = B;
+    positions[floorCenter * 3 + 2]  = BF;
   } else if (!fullHole) {
     holeBotOff = centerBase;
     holeTopOff = centerBase + Nx;
@@ -1260,7 +1260,7 @@ export function buildEllipseGeometry(heightmap, opts) {
       const vi = (holeTopOff + i) * 3;
       positions[vi]     = holeAx * cosT[i];
       positions[vi + 1] = holeBx * sinT[i];
-      positions[vi + 2] = B;
+      positions[vi + 2] = BF;
     }
   }
 

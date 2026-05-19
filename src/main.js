@@ -102,9 +102,10 @@ const els = {
   ellipseControls: $('ellipseControls'),
   ellipseX:          $('ellipseX'),         ellipseXNum:          $('ellipseXNum'),
   ellipseY:          $('ellipseY'),         ellipseYNum:          $('ellipseYNum'),
-  ellipseThickness:  $('ellipseThickness'), ellipseThicknessNum:  $('ellipseThicknessNum'),
-  ellipseHeight:     $('ellipseHeight'),    ellipseHeightNum:     $('ellipseHeightNum'),
-  ellipseBottomHole: $('ellipseBottomHole'),ellipseBottomHoleNum: $('ellipseBottomHoleNum'),
+  ellipseThickness:       $('ellipseThickness'),       ellipseThicknessNum:       $('ellipseThicknessNum'),
+  ellipseBottomThickness: $('ellipseBottomThickness'), ellipseBottomThicknessNum: $('ellipseBottomThicknessNum'),
+  ellipseHeight:          $('ellipseHeight'),          ellipseHeightNum:          $('ellipseHeightNum'),
+  ellipseBottomHole:      $('ellipseBottomHole'),      ellipseBottomHoleNum:      $('ellipseBottomHoleNum'),
   stlWrapControls: $('stlWrapControls'),
   wrapStlFile: $('wrapStlFile'),
   wrapStlResetBtn: $('wrapStlResetBtn'),
@@ -189,9 +190,10 @@ const sliderPairs = [
   ['stretchY',        'stretchYNum'],
   ['ellipseX',          'ellipseXNum'],
   ['ellipseY',          'ellipseYNum'],
-  ['ellipseThickness',  'ellipseThicknessNum'],
-  ['ellipseHeight',     'ellipseHeightNum'],
-  ['ellipseBottomHole', 'ellipseBottomHoleNum']
+  ['ellipseThickness',       'ellipseThicknessNum'],
+  ['ellipseBottomThickness', 'ellipseBottomThicknessNum'],
+  ['ellipseHeight',          'ellipseHeightNum'],
+  ['ellipseBottomHole',      'ellipseBottomHoleNum']
 ];
 
 function linkPair(rangeEl, numEl) {
@@ -1409,11 +1411,12 @@ function readParamsFromUI() {
     radiusFactor: parseFloat(els.radiusFactor.value) || 1,
     heightFactor: parseFloat(els.heightFactor.value) || 1,
     outerBandFrac: parseFloat(els.outerBandFrac.value) || 50,
-    ellipseX:          parseFloat(els.ellipseX.value)          || 40,
-    ellipseY:          parseFloat(els.ellipseY.value)          || 25,
-    ellipseThickness:  parseFloat(els.ellipseThickness.value)  || 1.5,
-    ellipseHeight:     parseFloat(els.ellipseHeight.value)     || 40,
-    ellipseBottomHole: parseFloat(els.ellipseBottomHole.value) || 0,
+    ellipseX:               parseFloat(els.ellipseX.value)               || 40,
+    ellipseY:               parseFloat(els.ellipseY.value)               || 25,
+    ellipseThickness:       parseFloat(els.ellipseThickness.value)       || 1.5,
+    ellipseBottomThickness: parseFloat(els.ellipseBottomThickness.value) || 1.2,
+    ellipseHeight:          parseFloat(els.ellipseHeight.value)          || 40,
+    ellipseBottomHole:      parseFloat(els.ellipseBottomHole.value)      || 0,
     autoCrop: state.autoCrop,
     rotation: state.rotation,
     zoomX: parseFloat(els.zoomSliderX.value) / 100 || 1,
@@ -1452,11 +1455,12 @@ function writeParamsToUI(p) {
   setNum('radiusFactor', 'radiusFactorNum', p.radiusFactor);
   setNum('heightFactor', 'heightFactorNum', p.heightFactor);
   setNum('outerBandFrac', 'outerBandFracNum', p.outerBandFrac);
-  setNum('ellipseX',          'ellipseXNum',          p.ellipseX);
-  setNum('ellipseY',          'ellipseYNum',          p.ellipseY);
-  setNum('ellipseThickness',  'ellipseThicknessNum',  p.ellipseThickness);
-  setNum('ellipseHeight',     'ellipseHeightNum',     p.ellipseHeight);
-  setNum('ellipseBottomHole', 'ellipseBottomHoleNum', p.ellipseBottomHole);
+  setNum('ellipseX',               'ellipseXNum',               p.ellipseX);
+  setNum('ellipseY',               'ellipseYNum',               p.ellipseY);
+  setNum('ellipseThickness',       'ellipseThicknessNum',       p.ellipseThickness);
+  setNum('ellipseBottomThickness', 'ellipseBottomThicknessNum', p.ellipseBottomThickness);
+  setNum('ellipseHeight',          'ellipseHeightNum',          p.ellipseHeight);
+  setNum('ellipseBottomHole',      'ellipseBottomHoleNum',      p.ellipseBottomHole);
   setNum('stlRenderSize', 'stlRenderSizeNum', p.stlRenderSize);
   setNum('tileX', 'tileXNum', p.uiTileX != null ? p.uiTileX : p.tileX);
   setNum('tileY', 'tileYNum', p.tileY);
@@ -2102,10 +2106,16 @@ function regenerateMesh() {
         closedBottom: params.closedBottom
       });
     } else if (params.shape === 'ellipse') {
+      let maxRelief = 0;
+      for (let i = 0; i < heightmap.data.length; i++) {
+        if (heightmap.data[i] > maxRelief) maxRelief = heightmap.data[i];
+      }
+      const effectiveWallThickness = params.ellipseThickness + maxRelief;
       geom = buildEllipseGeometry(heightmap, {
         xSize: params.ellipseX,
         ySize: params.ellipseY,
-        thickness: params.ellipseThickness,
+        thickness: effectiveWallThickness,
+        bottomThickness: params.ellipseBottomThickness,
         height: params.ellipseHeight,
         bottomHolePct: params.ellipseBottomHole
       });
