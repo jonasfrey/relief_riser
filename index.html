@@ -16,6 +16,16 @@
       <!-- Column 1: image input + 2D editor -->
       <section class="col col-image">
         <div class="panel">
+          <h2>0. Project</h2>
+          <div class="control inline" style="gap:0.4rem; flex-wrap:wrap;">
+            <button id="saveProjectBtn" class="btn" type="button">Save project…</button>
+            <button id="loadProjectBtn" class="btn" type="button">Load project…</button>
+            <input type="file" id="projectFileInput" accept=".json,application/json" hidden />
+          </div>
+          <p class="hint">Saves the loaded image/mesh, custom profile/wrap STL, and all settings to a single <code>.json</code> file you can reload later.</p>
+        </div>
+
+        <div class="panel">
           <h2>1. Source image</h2>
           <div id="dropZone" class="drop-zone">
             <p>Drop an image, .stl or .glb here, or</p>

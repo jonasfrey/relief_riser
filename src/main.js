@@ -157,6 +157,10 @@ const els = {
   regenButtonWrap: $('regenButtonWrap'),
   regenBtn: $('regenBtn'),
 
+  saveProjectBtn: $('saveProjectBtn'),
+  loadProjectBtn: $('loadProjectBtn'),
+  projectFileInput: $('projectFileInput'),
+
   viewport: $('viewport')
 };
 
@@ -2571,6 +2575,212 @@ els.downloadOBJ.addEventListener('click', () => {
   );
   downloadBlob(mtlBlob, mtlFilename);
   downloadBlob(objBlob, objFilename);
+});
+
+// ---------- project save / load ----------
+
+const PROJECT_FORMAT = 'relief-riser-project';
+const PROJECT_VERSION = 1;
+
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let bin = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(bin);
+}
+
+function base64ToArrayBuffer(b64) {
+  const bin = atob(b64);
+  const len = bin.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes.buffer;
+}
+
+function dataUrlToCanvas(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const c = document.createElement('canvas');
+      c.width = img.naturalWidth;
+      c.height = img.naturalHeight;
+      c.getContext('2d', { willReadFrequently: true }).drawImage(img, 0, 0);
+      resolve(c);
+    };
+    img.onerror = () => reject(new Error('Embedded image failed to decode'));
+    img.src = dataUrl;
+  });
+}
+
+function encodeMesh(mesh) {
+  if (!mesh || !mesh.positions) return null;
+  return {
+    positionsB64: arrayBufferToBase64(mesh.positions.buffer),
+    triCount: mesh.triCount
+  };
+}
+
+function decodeMesh(enc) {
+  if (!enc || !enc.positionsB64) return null;
+  return {
+    positions: new Float32Array(base64ToArrayBuffer(enc.positionsB64)),
+    triCount: enc.triCount | 0
+  };
+}
+
+function gatherProjectData() {
+  const data = {
+    format: PROJECT_FORMAT,
+    version: PROJECT_VERSION,
+    savedAt: new Date().toISOString(),
+    params: readParamsFromUI(),
+    source: {
+      filename: state.sourceFilename,
+      inputType: state.inputType
+    }
+  };
+  if (state.originalRawCanvas) {
+    data.source.imageDataUrl = state.originalRawCanvas.toDataURL('image/png');
+  }
+  if (state.inputType === 'stl' && state.stlData) {
+    data.source.stl = encodeMesh(state.stlData);
+  }
+  if (state.profilePoints) {
+    data.profile = {
+      points: state.profilePoints,
+      source: state.profileSource,
+      filename: state.profileFilename,
+      bandManual: state.profileBandManual
+    };
+  }
+  if (state.wrapStl) {
+    const enc = encodeMesh(state.wrapStl);
+    if (enc) {
+      data.wrapStl = {
+        ...enc,
+        filename: state.wrapStlFilename,
+        source: state.wrapStlSource
+      };
+    }
+  }
+  return data;
+}
+
+async function applyProjectData(data) {
+  if (!data || data.format !== PROJECT_FORMAT) {
+    throw new Error('Not a Relief Riser project file');
+  }
+  // 1. Source image / STL — restored before params so shape-derived dims
+  //    can read the actual canvas dimensions.
+  if (data.source) {
+    state.sourceFilename = data.source.filename || null;
+    state.inputType = data.source.inputType === 'stl' ? 'stl' : 'image';
+    state.stlData = data.source.stl ? decodeMesh(data.source.stl) : null;
+    state.originalRawCanvas = data.source.imageDataUrl
+      ? await dataUrlToCanvas(data.source.imageDataUrl)
+      : null;
+    state.lastStlRenderSize = 0;
+  } else {
+    state.originalRawCanvas = null;
+    state.stlData = null;
+  }
+
+  // 2. Custom profile (DXF)
+  if (data.profile && Array.isArray(data.profile.points)) {
+    state.profilePoints = data.profile.points;
+    state.profileSource = data.profile.source || null;
+    state.profileFilename = data.profile.filename || null;
+    state.profileBandManual = data.profile.bandManual || null;
+    state.profileBandPicking = null;
+  } else {
+    state.profilePoints = null;
+    state.profileSource = null;
+    state.profileFilename = null;
+    state.profileBandManual = null;
+    state.profileBandPicking = null;
+  }
+
+  // 3. Wrap STL target
+  if (data.wrapStl) {
+    state.wrapStl = decodeMesh(data.wrapStl);
+    state.wrapStlFilename = data.wrapStl.filename || null;
+    state.wrapStlSource = data.wrapStl.source || null;
+    state.wrapStlInfo = state.wrapStl ? computeWrapStlInfo(state.wrapStl) : null;
+  } else {
+    state.wrapStl = null;
+    state.wrapStlFilename = null;
+    state.wrapStlSource = null;
+    state.wrapStlInfo = null;
+  }
+
+  // 4. UI params — sets state.shape, layer config, sliders, etc.
+  if (data.params) writeParamsToUI(data.params);
+
+  // 5. UI bits that don't auto-refresh from writeParamsToUI
+  updateStlControlsVisibility();
+  renderLayerHeights();
+  updateThresholdVisibility();
+  updateShapeLabels();
+  updateResolutionVisibility();
+  updateCropStatus();
+  if (state.profilePoints && state.profileFilename) {
+    setProfileStatus(`${state.profileFilename} — ${state.profilePoints.length} points`);
+    updateBandModeLabel();
+    drawProfilePreview();
+  } else {
+    setProfileStatus('');
+  }
+  if (state.wrapStlInfo && state.wrapStlFilename) {
+    setWrapStlStatus(formatWrapStlInfo(state.wrapStlFilename, state.wrapStlInfo));
+  } else {
+    setWrapStlStatus('');
+  }
+
+  // 6. Re-derive source pipeline from the restored canvas + params.
+  applyRotation();
+  applyAutoCrop();
+  applyDerivedDims();
+
+  // 7. Persist current params and kick off regeneration.
+  persist();
+  setExportEnabled(false);
+  viewer.requestFrame();
+  triggerProcessing(true);
+}
+
+function saveProject() {
+  try {
+    const data = gatherProjectData();
+    const json = JSON.stringify(data);
+    const blob = new Blob([json], { type: 'application/json' });
+    const baseName = (state.sourceFilename || 'project').replace(/[^A-Za-z0-9._-]+/g, '_');
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    downloadBlob(blob, `${baseName}.${stamp}.relief-riser.json`);
+  } catch (err) {
+    showWarning('Could not save project: ' + err.message, true);
+  }
+}
+
+async function loadProjectFromFile(file) {
+  try {
+    const text = await file.text();
+    const data = JSON.parse(text);
+    await applyProjectData(data);
+  } catch (err) {
+    showWarning('Could not load project: ' + err.message, true);
+  }
+}
+
+els.saveProjectBtn.addEventListener('click', saveProject);
+els.loadProjectBtn.addEventListener('click', () => els.projectFileInput.click());
+els.projectFileInput.addEventListener('change', (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (file) loadProjectFromFile(file);
+  // Clear so picking the same file twice still fires `change`.
+  e.target.value = '';
 });
 
 // ---------- initial paint ----------
