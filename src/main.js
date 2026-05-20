@@ -816,8 +816,6 @@ const state = {
   cropDragIndex: -1,
 };
 
-const viewer = new Viewer(els.viewport);
-
 // ---------- color count + layer heights + layer colors ----------
 
 const COLOR_PALETTE = [
@@ -830,6 +828,8 @@ function defaultLayerColors(N) {
   for (let k = 0; k < N; k++) out.push(COLOR_PALETTE[k % COLOR_PALETTE.length]);
   return out;
 }
+
+const viewer = new Viewer(els.viewport);
 
 function defaultLayerHeights(N, max) {
   if (N === 1) return [max];
