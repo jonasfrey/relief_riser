@@ -17,12 +17,26 @@
       <section class="col col-image">
         <div class="panel">
           <h2>0. Project</h2>
+          <p class="hint">Bundles loaded image/mesh, custom profile/wrap STL, and all settings.</p>
+
+          <h3 style="margin:0.6rem 0 0.3rem;">Save / load as file</h3>
           <div class="control inline" style="gap:0.4rem; flex-wrap:wrap;">
-            <button id="saveProjectBtn" class="btn" type="button">Save project…</button>
-            <button id="loadProjectBtn" class="btn" type="button">Load project…</button>
+            <button id="saveProjectBtn" class="btn" type="button">Download…</button>
+            <button id="loadProjectBtn" class="btn" type="button">Upload…</button>
             <input type="file" id="projectFileInput" accept=".json,application/json" hidden />
           </div>
-          <p class="hint">Saves the loaded image/mesh, custom profile/wrap STL, and all settings to a single <code>.json</code> file you can reload later.</p>
+
+          <h3 style="margin:0.8rem 0 0.3rem;">Save / load on server</h3>
+          <div class="control">
+            <label for="serverProjectName">Project name</label>
+            <input type="text" id="serverProjectName" placeholder="e.g. cat-portrait-v2" autocomplete="off" />
+          </div>
+          <div class="control inline" style="gap:0.4rem; flex-wrap:wrap;">
+            <button id="serverSaveBtn" class="btn primary" type="button">Save to server</button>
+            <button id="serverRefreshBtn" class="btn" type="button">Refresh list</button>
+          </div>
+          <p class="hint" id="serverStatus" style="min-height:1em;"></p>
+          <ul id="serverProjectList" class="server-project-list"></ul>
         </div>
 
         <div class="panel">

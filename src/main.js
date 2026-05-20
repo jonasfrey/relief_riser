@@ -160,6 +160,11 @@ const els = {
   saveProjectBtn: $('saveProjectBtn'),
   loadProjectBtn: $('loadProjectBtn'),
   projectFileInput: $('projectFileInput'),
+  serverProjectName: $('serverProjectName'),
+  serverSaveBtn: $('serverSaveBtn'),
+  serverRefreshBtn: $('serverRefreshBtn'),
+  serverStatus: $('serverStatus'),
+  serverProjectList: $('serverProjectList'),
 
   viewport: $('viewport')
 };
@@ -2782,6 +2787,158 @@ els.projectFileInput.addEventListener('change', (e) => {
   // Clear so picking the same file twice still fires `change`.
   e.target.value = '';
 });
+
+// ---------- server project store ----------
+//
+// Backed by the Vite dev-server middleware in vite.config.js. Endpoints:
+//   GET    /api/projects            → list  [{name, size, savedAt}, ...]
+//   GET    /api/projects/:name      → fetch project JSON
+//   PUT    /api/projects/:name      → save  (body = project JSON)
+//   DELETE /api/projects/:name      → delete
+// Available only during `npm run dev` / `vite preview`. In a fully static
+// `vite build` deploy these calls 404, so the UI reports an error cleanly.
+
+function setServerStatus(msg, isError) {
+  if (!els.serverStatus) return;
+  els.serverStatus.textContent = msg || '';
+  els.serverStatus.style.color = isError ? '#c33' : '';
+}
+
+function defaultServerName() {
+  return (state.sourceFilename || 'untitled')
+    .replace(/[^A-Za-z0-9._\- ]+/g, '_')
+    .slice(0, 200) || 'untitled';
+}
+
+function formatBytesShort(n) {
+  if (!Number.isFinite(n)) return '';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatSavedAt(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleString();
+}
+
+async function fetchServerJson(url, opts) {
+  const res = await fetch(url, opts);
+  const ct = res.headers.get('content-type') || '';
+  const body = ct.includes('application/json') ? await res.json().catch(() => null) : await res.text();
+  if (!res.ok) {
+    const msg = body && body.error ? body.error : (typeof body === 'string' ? body : `HTTP ${res.status}`);
+    throw new Error(msg);
+  }
+  return body;
+}
+
+async function refreshServerProjectList() {
+  if (!els.serverProjectList) return;
+  setServerStatus('Loading…');
+  try {
+    const items = await fetchServerJson('/api/projects');
+    renderServerProjectList(Array.isArray(items) ? items : []);
+    setServerStatus(items.length ? `${items.length} project${items.length === 1 ? '' : 's'} on server` : 'No projects on server yet.');
+  } catch (err) {
+    renderServerProjectList([]);
+    setServerStatus(`Could not reach server: ${err.message}. (Server-side storage requires \`npm run dev\`.)`, true);
+  }
+}
+
+function renderServerProjectList(items) {
+  const list = els.serverProjectList;
+  if (!list) return;
+  list.innerHTML = '';
+  for (const item of items) {
+    const li = document.createElement('li');
+
+    const nameEl = document.createElement('span');
+    nameEl.className = 'proj-name';
+    nameEl.textContent = item.name;
+    nameEl.title = `Load "${item.name}"`;
+    nameEl.addEventListener('click', () => loadServerProject(item.name));
+
+    const meta = document.createElement('span');
+    meta.className = 'proj-meta';
+    meta.textContent = `${formatBytesShort(item.size)} · ${formatSavedAt(item.savedAt)}`;
+
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'proj-del';
+    del.textContent = 'Delete';
+    del.addEventListener('click', (e) => {
+      e.stopPropagation();
+      deleteServerProject(item.name);
+    });
+
+    li.appendChild(nameEl);
+    li.appendChild(meta);
+    li.appendChild(del);
+    list.appendChild(li);
+  }
+}
+
+async function saveServerProject() {
+  const rawName = (els.serverProjectName.value || '').trim() || defaultServerName();
+  setServerStatus(`Saving "${rawName}"…`);
+  try {
+    const data = gatherProjectData();
+    const info = await fetchServerJson(`/api/projects/${encodeURIComponent(rawName)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data)
+    });
+    els.serverProjectName.value = info.name || rawName;
+    setServerStatus(`Saved "${info.name}" (${formatBytesShort(info.size)}).`);
+    refreshServerProjectList();
+  } catch (err) {
+    setServerStatus(`Save failed: ${err.message}`, true);
+  }
+}
+
+async function loadServerProject(name) {
+  setServerStatus(`Loading "${name}"…`);
+  try {
+    const data = await fetchServerJson(`/api/projects/${encodeURIComponent(name)}`);
+    await applyProjectData(data);
+    els.serverProjectName.value = name;
+    setServerStatus(`Loaded "${name}".`);
+  } catch (err) {
+    setServerStatus(`Load failed: ${err.message}`, true);
+  }
+}
+
+async function deleteServerProject(name) {
+  if (!window.confirm(`Delete project "${name}" from the server?`)) return;
+  setServerStatus(`Deleting "${name}"…`);
+  try {
+    const res = await fetch(`/api/projects/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    if (!res.ok && res.status !== 204) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    setServerStatus(`Deleted "${name}".`);
+    refreshServerProjectList();
+  } catch (err) {
+    setServerStatus(`Delete failed: ${err.message}`, true);
+  }
+}
+
+if (els.serverSaveBtn) els.serverSaveBtn.addEventListener('click', saveServerProject);
+if (els.serverRefreshBtn) els.serverRefreshBtn.addEventListener('click', refreshServerProjectList);
+if (els.serverProjectName) {
+  els.serverProjectName.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      saveServerProject();
+    }
+  });
+}
+// Populate the list once on startup. If the server isn't reachable (static
+// build, no dev server), the status message explains it instead of failing.
+refreshServerProjectList();
 
 // ---------- initial paint ----------
 
