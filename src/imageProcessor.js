@@ -531,6 +531,39 @@ function gaussianBlurGray(src, w, h, radius) {
   return out;
 }
 
+// Parse a CSS hex color (#rrggbb or #rgb) to [r, g, b] integers 0-255.
+export function hexToRgb(hex) {
+  let h = (hex || '#888888').replace('#', '');
+  if (h.length === 3) h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
+  h = h.padEnd(6, '0');
+  return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+}
+
+// Build a colored ImageData from a levelMap.
+// For N>1: each level gets the corresponding color from `colors`.
+// For N=1: interpolates from white to colors[0] based on the 0-255 value.
+export function levelMapToColoredImageData(levelMap, N, w, h, colors) {
+  const out = new ImageData(w, h);
+  const d = out.data;
+  if (N === 1) {
+    const [cr, cg, cb] = hexToRgb(colors[0] || '#e0e0e0');
+    for (let i = 0, j = 0; i < levelMap.length; i++, j += 4) {
+      const t = Math.min(255, Math.max(0, levelMap[i])) / 255;
+      d[j]   = Math.round(255 + t * (cr - 255));
+      d[j+1] = Math.round(255 + t * (cg - 255));
+      d[j+2] = Math.round(255 + t * (cb - 255));
+      d[j+3] = 255;
+    }
+  } else {
+    const rgbs = colors.slice(0, N).map(hexToRgb);
+    for (let i = 0, j = 0; i < levelMap.length; i++, j += 4) {
+      const [r, g, b] = rgbs[Math.min(levelMap[i], N - 1)] || [136, 136, 136];
+      d[j] = r; d[j+1] = g; d[j+2] = b; d[j+3] = 255;
+    }
+  }
+  return out;
+}
+
 export function paintToCanvas(imgData, canvas) {
   canvas.width = imgData.width;
   canvas.height = imgData.height;

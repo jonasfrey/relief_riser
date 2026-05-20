@@ -434,8 +434,8 @@ select:focus {
 
 .layer-heights .layer-row {
   display: grid;
-  grid-template-columns: 70px 1fr 64px;
-  grid-template-areas: "label range num";
+  grid-template-columns: 70px 1fr 64px 26px;
+  grid-template-areas: "label range num color";
   align-items: center;
   gap: 0.4rem;
 }
@@ -448,6 +448,17 @@ select:focus {
 
 .layer-heights .layer-row input[type="range"] { grid-area: range; }
 .layer-heights .layer-row input[type="number"] { grid-area: num; }
+
+.layer-color-picker {
+  grid-area: color;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  background: none;
+}
 
 .layer-heights .layers-header {
   font-size: 0.82rem;

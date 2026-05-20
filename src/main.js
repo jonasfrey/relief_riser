@@ -41,6 +41,8 @@ import {
   estimateBinarySTLBytes,
   downloadBlob
 } from './stlExporter.js';
+import { exportOBJMTL } from './objExporter.js';
+import { levelMapToColoredImageData, hexToRgb } from './imageProcessor.js';
 
 // ---------- DOM lookup ----------
 
@@ -144,6 +146,7 @@ const els = {
 
   asciiSTL: $('asciiSTL'),
   downloadSTL: $('downloadSTL'),
+  downloadOBJ: $('downloadOBJ'),
   downloadPNG: $('downloadPNG'),
   exportHint: $('exportHint'),
 
@@ -779,6 +782,7 @@ const state = {
   geometry: null,
   colorCount: 2,
   layerHeights: [0, DEFAULT_MAX_HEIGHT],
+  layerColors: defaultLayerColors(2),
   shape: 'rectangular',
   polygonSides: 4,
   autoCrop: true,
@@ -814,7 +818,18 @@ const state = {
 
 const viewer = new Viewer(els.viewport);
 
-// ---------- color count + layer heights ----------
+// ---------- color count + layer heights + layer colors ----------
+
+const COLOR_PALETTE = [
+  '#f0f0f0', '#e85050', '#4a90e2', '#50c850',
+  '#e8c040', '#9050c8', '#50c8c8', '#202020',
+];
+
+function defaultLayerColors(N) {
+  const out = [];
+  for (let k = 0; k < N; k++) out.push(COLOR_PALETTE[k % COLOR_PALETTE.length]);
+  return out;
+}
 
 function defaultLayerHeights(N, max) {
   if (N === 1) return [max];
@@ -838,6 +853,10 @@ function changeColorCount(newN) {
   const max = currentMaxLayerHeight() || DEFAULT_MAX_HEIGHT;
   state.colorCount = newN;
   state.layerHeights = defaultLayerHeights(newN, max);
+  // Preserve existing colors when expanding; fill new slots from palette
+  while (state.layerColors.length < newN) {
+    state.layerColors.push(COLOR_PALETTE[state.layerColors.length % COLOR_PALETTE.length]);
+  }
   els.colorCount.value = String(newN);
   renderLayerHeights();
   updateThresholdVisibility();
@@ -899,6 +918,20 @@ function makeLayerControl(k, labelText, value, compact) {
   };
   range.addEventListener('input', () => { sync(range, num); onParamChange(); });
   num.addEventListener('input', () => { sync(num, range); onParamChange(); });
+
+  if (compact) {
+    const colorPicker = document.createElement('input');
+    colorPicker.type = 'color';
+    colorPicker.id = `layerColor${k}`;
+    colorPicker.title = `Layer ${k} color`;
+    colorPicker.value = state.layerColors[k] || COLOR_PALETTE[k % COLOR_PALETTE.length];
+    colorPicker.className = 'layer-color-picker';
+    colorPicker.addEventListener('input', () => {
+      state.layerColors[k] = colorPicker.value;
+      onParamChange();
+    });
+    wrap.appendChild(colorPicker);
+  }
 
   return wrap;
 }
@@ -1431,7 +1464,8 @@ function readParamsFromUI() {
 
     asciiSTL: els.asciiSTL.checked,
     showClipping: els.showClipping.checked,
-    cropPolygon: state.cropPolygon.map((p) => ({ x: p.x, y: p.y }))
+    cropPolygon: state.cropPolygon.map((p) => ({ x: p.x, y: p.y })),
+    layerColors: state.layerColors.slice(0, state.colorCount),
   };
 }
 
@@ -1498,6 +1532,12 @@ function writeParamsToUI(p) {
   if (Array.isArray(p.layerHeights) && p.layerHeights.length) {
     state.layerHeights = p.layerHeights.slice();
     while (state.layerHeights.length < state.colorCount) state.layerHeights.push(0);
+  }
+  if (Array.isArray(p.layerColors) && p.layerColors.length) {
+    state.layerColors = p.layerColors.slice();
+    while (state.layerColors.length < 8) {
+      state.layerColors.push(COLOR_PALETTE[state.layerColors.length % COLOR_PALETTE.length]);
+    }
   }
   if (p.shape === 'rectangular' || p.shape === 'cylindrical' || p.shape === 'polygon' || p.shape === 'customProfile' || p.shape === 'stlWrap' || p.shape === 'ellipse') {
     state.shape = p.shape;
@@ -1722,14 +1762,18 @@ function canvasToImageData(c) {
 // shown as black, so clipped regions jump out visually. Mid-tone pixels
 // pass through unchanged so the grayscale heightmap reads normally.
 function paintProcessedCanvas(processed) {
-  const imgData = processed.displayImageData;
-  if (!els.showClipping.checked) {
-    paintToCanvas(imgData, els.processedCanvas);
+  const N = processed.colorCount;
+  const colors = state.layerColors.slice(0, N);
+  // Show colored preview; clipping highlight only applies in grayscale mode
+  const colored = levelMapToColoredImageData(processed.levelMap, N, processed.width, processed.height, colors);
+  if (!els.showClipping.checked || N > 1) {
+    paintToCanvas(colored, els.processedCanvas);
     return;
   }
-  const w = imgData.width, h = imgData.height;
+  // Clipping highlight for N=1 continuous mode
+  const w = colored.width, h = colored.height;
   const out = new ImageData(w, h);
-  const src = imgData.data;
+  const src = colored.data;
   const dst = out.data;
   for (let i = 0; i < src.length; i += 4) {
     const r = src[i], g = src[i + 1], b = src[i + 2];
@@ -2065,6 +2109,42 @@ function regeneratePreview() {
   return true;
 }
 
+// Map each vertex in the geometry to its levelMap pixel, then look up the
+// user-chosen color for that level. All geometry builders place the outer
+// surface as the first Nx*Ny vertices (same row-major order as levelMap),
+// and the inner/back surface as the next Nx*Ny vertices.
+function buildVertexColors(geom, processed) {
+  const Nx = geom.Nx, Ny = geom.Ny;
+  const surfaceVerts = Nx * Ny;
+  const totalVerts = geom.positions.length / 3;
+  const N = processed.colorCount;
+  const levelMap = processed.levelMap;
+  const colors = state.layerColors.slice(0, N);
+  const out = new Float32Array(totalVerts * 3);
+
+  if (N === 1) {
+    const [cr, cg, cb] = hexToRgb(colors[0] || '#e0e0e0');
+    for (let v = 0; v < totalVerts; v++) {
+      const pixelIdx = Math.min(v < surfaceVerts ? v : v - surfaceVerts, surfaceVerts - 1);
+      const t = Math.min(255, Math.max(0, levelMap[pixelIdx])) / 255;
+      out[v * 3]     = (255 + t * (cr - 255)) / 255;
+      out[v * 3 + 1] = (255 + t * (cg - 255)) / 255;
+      out[v * 3 + 2] = (255 + t * (cb - 255)) / 255;
+    }
+  } else {
+    const rgbs = colors.map((c) => hexToRgb(c));
+    for (let v = 0; v < totalVerts; v++) {
+      const pixelIdx = Math.min(v < 2 * surfaceVerts ? (v < surfaceVerts ? v : v - surfaceVerts) : 0, surfaceVerts - 1);
+      const level = Math.min(levelMap[pixelIdx], N - 1);
+      const [r, g, b] = rgbs[level] || [136, 136, 136];
+      out[v * 3]     = r / 255;
+      out[v * 3 + 1] = g / 255;
+      out[v * 3 + 2] = b / 255;
+    }
+  }
+  return out;
+}
+
 // Phase 2: build geometry from the cached heightmap and push it to the
 // viewer. Slow at high triangle counts, so callers may debounce or gate
 // this on user click while still letting regeneratePreview run instantly.
@@ -2147,7 +2227,10 @@ function regenerateMesh() {
   }
 
   state.geometry = geom;
-  viewer.setMesh(geom.positions, geom.indices);
+
+  // Build vertex colors from levelMap (outer surface = first Nx*Ny vertices).
+  const vertexColors = buildVertexColors(geom, state.processed);
+  viewer.setMesh(geom.positions, geom.indices, vertexColors);
 
   setExportEnabled(true);
   updateStats({ tris: geom.triCount, verts: geom.vertCount });
@@ -2200,6 +2283,7 @@ function formatPtsPerMm(pts) {
 
 function setExportEnabled(on) {
   els.downloadSTL.disabled = !on;
+  els.downloadOBJ.disabled = !on;
   els.downloadPNG.disabled = !on;
   if (on) {
     const params = readParamsFromUI();
@@ -2315,6 +2399,25 @@ els.downloadPNG.addEventListener('click', () => {
   c.toBlob((blob) => {
     if (blob) downloadBlob(blob, exportFilename('png', readParamsFromUI()));
   }, 'image/png');
+});
+
+els.downloadOBJ.addEventListener('click', () => {
+  if (!state.geometry || !state.processed) return;
+  const params = readParamsFromUI();
+  const N = state.processed.colorCount;
+  const baseName = exportFilename('', params).replace(/\.$/, '');
+  const { objBlob, mtlBlob, objFilename, mtlFilename } = exportOBJMTL(
+    state.geometry.positions,
+    state.geometry.indices,
+    state.processed.levelMap,
+    state.geometry.Nx,
+    state.geometry.Ny,
+    state.layerColors.slice(0, N),
+    N,
+    baseName
+  );
+  downloadBlob(mtlBlob, mtlFilename);
+  downloadBlob(objBlob, objFilename);
 });
 
 // ---------- initial paint ----------

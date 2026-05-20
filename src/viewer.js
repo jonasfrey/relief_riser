@@ -161,16 +161,26 @@ export class Viewer {
     this.renderer.setSize(w, h);
   }
 
-  setMesh(positions, indices) {
+  setMesh(positions, indices, vertexColors = null) {
     if (this._broken) return;
     this._disposeMeshes();
 
     const geom = new THREE.BufferGeometry();
     geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geom.setIndex(new THREE.BufferAttribute(indices, 1));
+    if (vertexColors) {
+      geom.setAttribute('color', new THREE.BufferAttribute(vertexColors, 3));
+    }
     geom.computeVertexNormals();
     geom.computeBoundingBox();
     this._sharedGeometry = geom;
+
+    const useVC = !!vertexColors;
+    if (this.solidMaterial.vertexColors !== useVC) {
+      this.solidMaterial.vertexColors = useVC;
+      this.solidMaterial.color.set(useVC ? 0xffffff : 0xd4d6dc);
+      this.solidMaterial.needsUpdate = true;
+    }
 
     this.solidMesh = new THREE.Mesh(geom, this.solidMaterial);
     this.solidMesh.visible = this.show.solid;
