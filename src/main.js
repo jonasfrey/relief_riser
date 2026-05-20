@@ -2405,15 +2405,10 @@ function regenerateMesh() {
         closedBottom: params.closedBottom
       });
     } else if (params.shape === 'ellipse') {
-      let maxRelief = 0;
-      for (let i = 0; i < heightmap.data.length; i++) {
-        if (heightmap.data[i] > maxRelief) maxRelief = heightmap.data[i];
-      }
-      const effectiveWallThickness = params.ellipseThickness + maxRelief;
       geom = buildEllipseGeometry(heightmap, {
         xSize: params.ellipseX,
         ySize: params.ellipseY,
-        thickness: effectiveWallThickness,
+        thickness: params.ellipseThickness,
         bottomThickness: params.ellipseBottomThickness,
         height: params.ellipseHeight,
         bottomHolePct: params.ellipseBottomHole
