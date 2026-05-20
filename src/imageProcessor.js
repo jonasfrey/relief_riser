@@ -162,11 +162,21 @@ export function rasterize(sourceCanvas, targetW, targetH, fitMode, opts = {}) {
     dy = marginPxY;
   }
 
-  const tileW = dw / tileX;
-  const tileH = dh / tileY;
+  // Snap each tile's destination rect to integer pixels. Floating-point tile
+  // positions cause drawImage to anti-alias the shared edge against the
+  // black background fill, leaving a thin low-value seam that the heightmap
+  // then reads as a gap between adjacent tiles. By computing each tile's
+  // pixel-aligned x0/x1 (and y0/y1) so adjacent tiles share the same integer
+  // boundary, the seam is exact and no fill color bleeds through.
   for (let j = 0; j < tileY; j++) {
+    const y0 = Math.round(dy + j * dh / tileY);
+    const y1 = Math.round(dy + (j + 1) * dh / tileY);
+    const th = y1 - y0;
     for (let i = 0; i < tileX; i++) {
-      ctx.drawImage(sourceCanvas, dx + i * tileW, dy + j * tileH, tileW, tileH);
+      const x0 = Math.round(dx + i * dw / tileX);
+      const x1 = Math.round(dx + (i + 1) * dw / tileX);
+      const tw = x1 - x0;
+      ctx.drawImage(sourceCanvas, x0, y0, tw, th);
     }
   }
 
