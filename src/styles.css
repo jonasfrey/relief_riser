@@ -460,6 +460,14 @@ select:focus {
   background: none;
 }
 
+/* Non-compact (N=1 / lithophane) row: picker floats to the right under the
+   number input rather than fitting a 4-column grid. */
+.layer-heights > .control:not(.layer-row) .layer-color-picker {
+  display: inline-block;
+  margin-left: 0.4rem;
+  vertical-align: middle;
+}
+
 .layer-heights .layers-header {
   font-size: 0.82rem;
   color: var(--text-dim);

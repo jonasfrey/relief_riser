@@ -919,19 +919,17 @@ function makeLayerControl(k, labelText, value, compact) {
   range.addEventListener('input', () => { sync(range, num); onParamChange(); });
   num.addEventListener('input', () => { sync(num, range); onParamChange(); });
 
-  if (compact) {
-    const colorPicker = document.createElement('input');
-    colorPicker.type = 'color';
-    colorPicker.id = `layerColor${k}`;
-    colorPicker.title = `Layer ${k} color`;
-    colorPicker.value = state.layerColors[k] || COLOR_PALETTE[k % COLOR_PALETTE.length];
-    colorPicker.className = 'layer-color-picker';
-    colorPicker.addEventListener('input', () => {
-      state.layerColors[k] = colorPicker.value;
-      onParamChange();
-    });
-    wrap.appendChild(colorPicker);
-  }
+  const colorPicker = document.createElement('input');
+  colorPicker.type = 'color';
+  colorPicker.id = `layerColor${k}`;
+  colorPicker.title = compact ? `Layer ${k} color` : 'Relief tint (gradient from white)';
+  colorPicker.value = state.layerColors[k] || COLOR_PALETTE[k % COLOR_PALETTE.length];
+  colorPicker.className = 'layer-color-picker';
+  colorPicker.addEventListener('input', () => {
+    state.layerColors[k] = colorPicker.value;
+    onParamChange();
+  });
+  wrap.appendChild(colorPicker);
 
   return wrap;
 }
