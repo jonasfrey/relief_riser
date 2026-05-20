@@ -121,7 +121,10 @@
             <input type="range" id="stretchY" min="1" max="2" step="0.01" value="1" />
             <input type="number" id="stretchYNum" min="1" max="2" step="0.01" value="1" />
           </div>
-          <p class="hint">Non-uniform stretch applied to the image before it's fit onto the shape. Keep below 2× — the relief loses detail along the stretched axis.</p>
+          <div class="control inline">
+            <button type="button" id="autoStretchShape">Auto-fit to shape aspect</button>
+          </div>
+          <p class="hint">Non-uniform stretch applied to the image before it's fit onto the shape. Keep below 2× — the relief loses detail along the stretched axis. Auto-fit picks the smallest stretch (≥ 1×) that makes the image cover the shape without letterboxing.</p>
           <div class="preview-pair">
             <div>
               <h3>Source <span id="cropBadge" class="badge hidden">cropped</span></h3>

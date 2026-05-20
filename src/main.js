@@ -70,6 +70,7 @@ const els = {
   blackPoint: $('blackPoint'),       blackPointNum: $('blackPointNum'),
   whitePoint: $('whitePoint'),       whitePointNum: $('whitePointNum'),
   autoStretch: $('autoStretch'),
+  autoStretchShape: $('autoStretchShape'),
   invert: $('invert'),
   colorCount: $('colorCount'),
   resolutionMode: $('resolutionMode'),
@@ -285,6 +286,23 @@ els.autoStretch.addEventListener('click', () => {
   els.blackPointNum.value = String(lo);
   els.whitePoint.value = String(hi);
   els.whitePointNum.value = String(hi);
+  onParamChange();
+});
+
+// Auto-fit stretch: pick stretchX / stretchY so the (cropped, tiled) source
+// covers the unrolled shape surface without letterboxing. The rasterizer
+// fits combined tile aspect (imgW · tileX) / (imgH · tileY) into the
+// surface aspect baseW / baseH; equating those gives the desired sx/sy
+// ratio. Sliders are clamped to [1, 2], so only the smaller-aspect axis
+// gets stretched — the other stays at 1.
+els.autoStretchShape.addEventListener('click', () => {
+  const dims = computeAutoStretchDims();
+  if (!dims) return;
+  const { sx, sy } = dims;
+  els.stretchX.value = sx.toFixed(2);
+  els.stretchXNum.value = sx.toFixed(2);
+  els.stretchY.value = sy.toFixed(2);
+  els.stretchYNum.value = sy.toFixed(2);
   onParamChange();
 });
 
@@ -2017,6 +2035,45 @@ function onParamChange() {
   if (state.shape === 'customProfile') drawProfilePreview();
   persist();
   triggerProcessing(false);
+}
+
+// Compute the stretchX / stretchY needed so the (cropped, tiled) source
+// covers the unrolled shape surface without letterboxing in fit mode.
+// The rasterizer treats the tile array as a single image of aspect
+//   (imgW · tileX) / (imgH · tileY)
+// and fits it into the surface aspect baseW / baseH. Setting those equal
+// after a (sx, sy) prestretch gives
+//   sx / sy = (baseW · tileY · imgH) / (baseH · tileX · imgW)
+// Sliders are clamped to [1, 2], so the smaller-aspect axis stays at 1
+// and only the larger one is enlarged.
+function computeAutoStretchDims() {
+  if (!state.sourceCanvas) return null;
+  const params = readParamsFromUI();
+  let baseW, baseH;
+  if (params.shape === 'customProfile') {
+    const cd = customProfileDims(params);
+    if (!cd) return null;
+    baseW = cd.circumference;
+    baseH = cd.bandLength;
+  } else if (params.shape === 'cylindrical' || params.shape === 'stlWrap' || params.shape === 'ellipse') {
+    baseW = params.plateW * params.tileX;
+    baseH = params.plateH;
+  } else {
+    baseW = params.plateW;
+    baseH = params.plateH;
+  }
+  if (!(baseW > 0) || !(baseH > 0)) return null;
+
+  const crop = currentCropRect();
+  const imgW = state.sourceCanvas.width * crop.fX;
+  const imgH = state.sourceCanvas.height * crop.fY;
+  if (!(imgW > 0) || !(imgH > 0)) return null;
+
+  const tileX = Math.max(1, params.tileX | 0 || 1);
+  const tileY = Math.max(1, params.tileY | 0 || 1);
+  const R = (baseW * tileY * imgH) / (baseH * tileX * imgW);
+  const clamp = (v) => Math.max(1, Math.min(2, v));
+  return R >= 1 ? { sx: clamp(R), sy: 1 } : { sx: 1, sy: clamp(1 / R) };
 }
 
 function getTargetDims(params) {
