@@ -468,6 +468,22 @@ select:focus {
   vertical-align: middle;
 }
 
+/* Smooth-mode band row: label + color picker only (no per-band height).
+   Same first column width as .layer-row so labels line up. */
+.layer-heights .band-row {
+  display: grid;
+  grid-template-columns: 70px 1fr 26px;
+  grid-template-areas: "label gap color";
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.layer-heights .band-row label {
+  grid-area: label;
+  font-size: 0.82rem;
+  color: var(--text-dim);
+}
+
 /* Split-boundary slider sitting between two layer rows. Same column widths
    as .layer-row so the slider track aligns with the height sliders above
    and below it. */

@@ -395,10 +395,13 @@ export function processImage(rasterCanvas, params) {
   // levelsFloat (the same float array) is used by buildHeightmap in N=1 mode
   // so the continuous lithophane heightmap retains full sub-integer precision
   // from the blur + levels pipeline.
+  // Always carry levelsFloat through. For N=1 it's the actual heightmap
+  // source. For N≥2 it lets buildHeightmap optionally produce a *smooth*
+  // (continuous) heightmap while the bucketed levelMap still drives color
+  // bands — i.e. a multi-coloured lithophane.
+  const levelsFloat = framed;
   let levelMap;
-  let levelsFloat = null;
   if (N === 1) {
-    levelsFloat = framed;
     levelMap = new Uint8Array(framed.length);
     for (let i = 0; i < framed.length; i++) {
       let v = framed[i];
@@ -449,11 +452,17 @@ export function buildHeightmap(processed, params) {
   const len = processed.width * processed.height;
   const out = new Float32Array(len);
 
-  if (N === 1) {
-    const max = Number(params.layerHeights[0]) || 0;
-    // Prefer the float source from processImage so smooth gradients don't
-    // terrace on the way to mm heights. Falls back to uint8 levelMap if a
-    // caller hands in a processed result without levelsFloat.
+  // "Smooth" mode (N=1, or N≥2 with the smooth-heightmap toggle on) builds a
+  // continuous heightmap from the float pipeline. The bucketed levelMap is
+  // still emitted by processImage for colour band lookup — that lets you have
+  // e.g. a lithophane surface that's smooth in Z but split into two flat
+  // colour regions in the slicer.
+  const smooth = N === 1 || !!params.heightSmooth;
+
+  if (smooth) {
+    const heights = params.layerHeights.slice(0, N).map((v) => Number(v) || 0);
+    let max = 0;
+    for (const h of heights) if (h > max) max = h;
     const src = processed.levelsFloat || processed.levelMap;
     if (params.invertHeight) {
       for (let i = 0; i < len; i++) {

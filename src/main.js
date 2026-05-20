@@ -130,6 +130,8 @@ const els = {
   baseThicknessControl: null,
   plateH: $('plateH'),               plateHNum: $('plateHNum'),
   baseThickness: $('baseThickness'), baseThicknessNum: $('baseThicknessNum'),
+  heightSmooth: $('heightSmooth'),
+  heightSmoothControl: $('heightSmoothControl'),
   layerHeights: $('layerHeights'),
   autoDistribute: $('autoDistribute'),
   mapDir: $('mapDir'),
@@ -749,6 +751,12 @@ els.colorCount.addEventListener('change', () => {
   changeColorCount(newN);
 });
 
+els.heightSmooth.addEventListener('change', () => {
+  state.heightSmooth = els.heightSmooth.checked;
+  renderLayerHeights();
+  onParamChange();
+});
+
 els.autoDistribute.addEventListener('click', () => {
   const N = state.colorCount;
   const max = currentMaxLayerHeight() || 0.4;
@@ -805,6 +813,7 @@ const state = {
   layerHeights: [0, DEFAULT_MAX_HEIGHT],
   layerColors: defaultLayerColors(2),
   layerThresholds: defaultLayerThresholds(2),
+  heightSmooth: false,
   shape: 'rectangular',
   polygonSides: 4,
   autoCrop: true,
@@ -880,25 +889,76 @@ function renderLayerHeights() {
   const c = els.layerHeights;
   c.innerHTML = '';
 
+  // Smooth-toggle checkbox is irrelevant when N=1 (already smooth).
+  if (els.heightSmoothControl) {
+    els.heightSmoothControl.classList.toggle('hidden', N <= 1);
+  }
+  if (els.heightSmooth) {
+    els.heightSmooth.checked = !!state.heightSmooth;
+  }
+  if (els.autoDistribute) {
+    els.autoDistribute.classList.toggle('hidden', N <= 1 || state.heightSmooth);
+  }
+
   if (N === 1) {
     c.appendChild(makeLayerControl(0, 'Max relief height (mm)', state.layerHeights[0], false));
     return;
   }
 
+  const smooth = !!state.heightSmooth;
+
   const header = document.createElement('div');
   header.className = 'layers-header';
-  header.textContent = `${N} layers — split by pixel value (0 = darkest, 255 = lightest)`;
+  header.textContent = smooth
+    ? `${N} color bands — smooth heightmap; one max height, colors split by pixel value`
+    : `${N} layers — split by pixel value (0 = darkest, 255 = lightest)`;
   c.appendChild(header);
+
+  if (smooth) {
+    // Single max-relief slider — drives the continuous heightmap height.
+    // Stored in layerHeights[N-1] so the value persists across smooth↔stepped.
+    c.appendChild(makeLayerControl(N - 1, 'Max relief height (mm)', state.layerHeights[N - 1] ?? DEFAULT_MAX_HEIGHT, false));
+  }
 
   for (let k = 0; k < N; k++) {
     const range = rangeForLayer(k, N, state.layerThresholds);
     const label = `Layer ${k} (${range[0]}–${range[1]})`;
-    const row = makeLayerControl(k, label, state.layerHeights[k] ?? 0, true);
-    c.appendChild(row);
+    if (smooth) {
+      c.appendChild(makeBandControl(k, label));
+    } else {
+      c.appendChild(makeLayerControl(k, label, state.layerHeights[k] ?? 0, true));
+    }
     if (k < N - 1) {
       c.appendChild(makeThresholdControl(k, state.layerThresholds[k] ?? Math.round((k + 1) / N * 255)));
     }
   }
+}
+
+// Slim row used in smooth mode: just label + color picker. No per-band
+// height slider because in smooth mode there's a single max relief height
+// covering all bands.
+function makeBandControl(k, labelText) {
+  const wrap = document.createElement('div');
+  wrap.className = 'control band-row';
+
+  const label = document.createElement('label');
+  label.htmlFor = `layerH${k}`;
+  label.textContent = labelText;
+  wrap.appendChild(label);
+
+  const colorPicker = document.createElement('input');
+  colorPicker.type = 'color';
+  colorPicker.id = `layerColor${k}`;
+  colorPicker.title = `Layer ${k} color`;
+  colorPicker.value = state.layerColors[k] || COLOR_PALETTE[k % COLOR_PALETTE.length];
+  colorPicker.className = 'layer-color-picker';
+  colorPicker.addEventListener('input', () => {
+    state.layerColors[k] = colorPicker.value;
+    onParamChange();
+  });
+  wrap.appendChild(colorPicker);
+
+  return wrap;
 }
 
 // Pixel-value range that pixels in layer k fall into, given the current
@@ -1490,6 +1550,7 @@ function readParamsFromUI() {
     colorCount: state.colorCount,
     layerHeights: state.layerHeights.slice(0, state.colorCount),
     thresholds: state.layerThresholds.slice(0, Math.max(0, state.colorCount - 1)),
+    heightSmooth: !!state.heightSmooth,
     resolutionMode: state.resolutionMode,
     maxDim: parseInt(els.maxDim.value, 10),
     density: parseFloat(els.density.value),
@@ -1624,6 +1685,10 @@ function writeParamsToUI(p) {
     state.layerThresholds = p.thresholds.map((v) => Math.max(0, Math.min(255, v | 0)));
   } else {
     state.layerThresholds = defaultLayerThresholds(state.colorCount);
+  }
+  if (p.heightSmooth != null) {
+    state.heightSmooth = !!p.heightSmooth;
+    if (els.heightSmooth) els.heightSmooth.checked = state.heightSmooth;
   }
   if (p.shape === 'rectangular' || p.shape === 'cylindrical' || p.shape === 'polygon' || p.shape === 'customProfile' || p.shape === 'stlWrap' || p.shape === 'ellipse') {
     state.shape = p.shape;
@@ -2179,7 +2244,8 @@ function regeneratePreview() {
 
   const heightmapMm = buildHeightmap(processed, {
     layerHeights: params.layerHeights,
-    invertHeight: params.mapDir === 'black'
+    invertHeight: params.mapDir === 'black',
+    heightSmooth: params.heightSmooth
   });
   // "Invert grayscale" now means engrave: relief carves INTO the base wall
   // instead of protruding outward. Negate the heightmap so geometry's
