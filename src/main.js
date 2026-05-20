@@ -770,6 +770,14 @@ function defaultLayerColors(N) {
   return out;
 }
 
+// Evenly-spaced boundary values for N buckets — ascending list of length N-1.
+function defaultLayerThresholds(N) {
+  if (N <= 1) return [];
+  const out = [];
+  for (let k = 1; k < N; k++) out.push(Math.round((k / N) * 255));
+  return out;
+}
+
 // ---------- state ----------
 
 // v3 bump: W slider's meaning is now shape-dependent (radius for cylinder,
@@ -796,6 +804,7 @@ const state = {
   colorCount: 2,
   layerHeights: [0, DEFAULT_MAX_HEIGHT],
   layerColors: defaultLayerColors(2),
+  layerThresholds: defaultLayerThresholds(2),
   shape: 'rectangular',
   polygonSides: 4,
   autoCrop: true,
@@ -857,6 +866,9 @@ function changeColorCount(newN) {
   while (state.layerColors.length < newN) {
     state.layerColors.push(COLOR_PALETTE[state.layerColors.length % COLOR_PALETTE.length]);
   }
+  // Boundaries are evenly spaced on count change — finer to predict than
+  // trying to preserve user-set splits across an N change.
+  state.layerThresholds = defaultLayerThresholds(newN);
   els.colorCount.value = String(newN);
   renderLayerHeights();
   updateThresholdVisibility();
@@ -875,12 +887,83 @@ function renderLayerHeights() {
 
   const header = document.createElement('div');
   header.className = 'layers-header';
-  header.textContent = `${N} layers — Layer 0 = darkest pixels, Layer ${N - 1} = lightest`;
+  header.textContent = `${N} layers — split by pixel value (0 = darkest, 255 = lightest)`;
   c.appendChild(header);
 
   for (let k = 0; k < N; k++) {
-    c.appendChild(makeLayerControl(k, `Layer ${k}`, state.layerHeights[k] ?? 0, true));
+    const range = rangeForLayer(k, N, state.layerThresholds);
+    const label = `Layer ${k} (${range[0]}–${range[1]})`;
+    const row = makeLayerControl(k, label, state.layerHeights[k] ?? 0, true);
+    c.appendChild(row);
+    if (k < N - 1) {
+      c.appendChild(makeThresholdControl(k, state.layerThresholds[k] ?? Math.round((k + 1) / N * 255)));
+    }
   }
+}
+
+// Pixel-value range that pixels in layer k fall into, given the current
+// threshold list. Used purely for label text; processImage does the actual
+// bucketing from the same thresholds.
+function rangeForLayer(k, N, thresholds) {
+  const lo = k === 0 ? 0 : (thresholds[k - 1] | 0) + 1;
+  const hi = k === N - 1 ? 255 : (thresholds[k] | 0);
+  return [lo, hi];
+}
+
+// Refresh every layer row's label so the "Layer k (lo–hi)" text tracks the
+// current threshold values without rerendering (which would steal slider
+// focus mid-drag). Cheap — N labels at most.
+function refreshLayerLabels() {
+  const N = state.colorCount;
+  if (N === 1) return;
+  for (let k = 0; k < N; k++) {
+    const el = document.querySelector(`label[for="layerH${k}"]`);
+    if (!el) continue;
+    const [lo, hi] = rangeForLayer(k, N, state.layerThresholds);
+    el.textContent = `Layer ${k} (${lo}–${hi})`;
+  }
+}
+
+// Threshold (split-boundary) slider that sits between two layer rows.
+// idx is the index into state.layerThresholds; the slider is constrained to
+// stay strictly between its neighbouring thresholds so the bucket boundaries
+// remain monotonically increasing.
+function makeThresholdControl(idx, value) {
+  const wrap = document.createElement('div');
+  wrap.className = 'threshold-split';
+
+  const label = document.createElement('label');
+  label.textContent = '↕ split at';
+  wrap.appendChild(label);
+
+  const range = document.createElement('input');
+  range.type = 'range';
+  range.min = '0'; range.max = '255'; range.step = '1';
+  range.value = String(value);
+  wrap.appendChild(range);
+
+  const num = document.createElement('input');
+  num.type = 'number';
+  num.min = '0'; num.max = '255'; num.step = '1';
+  num.value = String(value);
+  wrap.appendChild(num);
+
+  const apply = (raw) => {
+    let v = parseInt(raw, 10);
+    if (!Number.isFinite(v)) return;
+    if (v < 0) v = 0; else if (v > 255) v = 255;
+    const prev = idx > 0 ? state.layerThresholds[idx - 1] : -1;
+    const next = idx < state.layerThresholds.length - 1 ? state.layerThresholds[idx + 1] : 256;
+    if (v <= prev) v = prev + 1;
+    if (v >= next) v = next - 1;
+    state.layerThresholds[idx] = v;
+    range.value = String(v);
+    num.value = String(v);
+  };
+  range.addEventListener('input', () => { apply(range.value); refreshLayerLabels(); onParamChange(); });
+  num.addEventListener('input',  () => { apply(num.value);   refreshLayerLabels(); onParamChange(); });
+
+  return wrap;
 }
 
 function makeLayerControl(k, labelText, value, compact) {
@@ -935,11 +1018,10 @@ function makeLayerControl(k, labelText, value, compact) {
 }
 
 function updateThresholdVisibility() {
-  if (state.colorCount === 2) {
-    els.thresholdControl.classList.remove('hidden');
-  } else {
-    els.thresholdControl.classList.add('hidden');
-  }
+  // Old single-threshold control is now superseded by inline split sliders
+  // in the layers panel; kept hidden so persisted slider values still load
+  // but the redundant UI doesn't show.
+  els.thresholdControl.classList.add('hidden');
 }
 
 function updateShapeLabels() {
@@ -1407,6 +1489,7 @@ function readParamsFromUI() {
     invert: els.invert.checked,
     colorCount: state.colorCount,
     layerHeights: state.layerHeights.slice(0, state.colorCount),
+    thresholds: state.layerThresholds.slice(0, Math.max(0, state.colorCount - 1)),
     resolutionMode: state.resolutionMode,
     maxDim: parseInt(els.maxDim.value, 10),
     density: parseFloat(els.density.value),
@@ -1536,6 +1619,11 @@ function writeParamsToUI(p) {
     while (state.layerColors.length < 8) {
       state.layerColors.push(COLOR_PALETTE[state.layerColors.length % COLOR_PALETTE.length]);
     }
+  }
+  if (Array.isArray(p.thresholds) && p.thresholds.length === state.colorCount - 1) {
+    state.layerThresholds = p.thresholds.map((v) => Math.max(0, Math.min(255, v | 0)));
+  } else {
+    state.layerThresholds = defaultLayerThresholds(state.colorCount);
   }
   if (p.shape === 'rectangular' || p.shape === 'cylindrical' || p.shape === 'polygon' || p.shape === 'customProfile' || p.shape === 'stlWrap' || p.shape === 'ellipse') {
     state.shape = p.shape;
@@ -2069,6 +2157,7 @@ function regeneratePreview() {
     blurRadius: params.blurRadius,
     invert: false,
     threshold: params.threshold,
+    thresholds: params.thresholds,
     blackPoint: params.blackPoint,
     whitePoint: params.whitePoint,
     colorCount: params.colorCount,

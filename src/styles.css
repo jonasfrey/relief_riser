@@ -468,6 +468,30 @@ select:focus {
   vertical-align: middle;
 }
 
+/* Split-boundary slider sitting between two layer rows. Same column widths
+   as .layer-row so the slider track aligns with the height sliders above
+   and below it. */
+.layer-heights .threshold-split {
+  display: grid;
+  grid-template-columns: 70px 1fr 64px 26px;
+  grid-template-areas: "label range num gap";
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0 0 0.4rem 0;
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  opacity: 0.9;
+}
+
+.layer-heights .threshold-split label {
+  grid-area: label;
+  text-align: right;
+  padding-right: 0.2rem;
+}
+
+.layer-heights .threshold-split input[type="range"]  { grid-area: range; }
+.layer-heights .threshold-split input[type="number"] { grid-area: num; }
+
 .layer-heights .layers-header {
   font-size: 0.82rem;
   color: var(--text-dim);

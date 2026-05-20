@@ -405,18 +405,30 @@ export function processImage(rasterCanvas, params) {
       if (v < 0) v = 0; else if (v > 255) v = 255;
       levelMap[i] = v;
     }
-  } else if (N === 2) {
-    const t = params.threshold;
-    levelMap = new Uint8Array(framed.length);
-    for (let i = 0; i < framed.length; i++) {
-      levelMap[i] = framed[i] > t ? 1 : 0;
-    }
   } else {
+    // N >= 2: bucket pixels by an explicit, ascending list of thresholds.
+    // pixel ≤ thresholds[0]               → layer 0
+    // thresholds[k-1] < pixel ≤ thresholds[k]  → layer k
+    // pixel > thresholds[N-2]             → layer N-1
+    // Fallback if thresholds missing: legacy single threshold (N=2) or evenly
+    // spaced bucketing (N≥3), so old persisted state still works.
+    let thresholds = Array.isArray(params.thresholds) ? params.thresholds.slice(0, N - 1) : null;
+    if (!thresholds || thresholds.length !== N - 1) {
+      if (N === 2 && typeof params.threshold === 'number') {
+        thresholds = [params.threshold];
+      } else {
+        thresholds = [];
+        for (let k = 1; k < N; k++) thresholds.push(Math.round((k / N) * 255));
+      }
+    }
     levelMap = new Uint8Array(framed.length);
     for (let i = 0; i < framed.length; i++) {
       let v = framed[i];
       if (v < 0) v = 0; else if (v > 255) v = 255;
-      let k = Math.floor((v / 256) * N);
+      let k = 0;
+      for (let t = 0; t < thresholds.length; t++) {
+        if (v > thresholds[t]) k = t + 1;
+      }
       if (k >= N) k = N - 1;
       levelMap[i] = k;
     }
