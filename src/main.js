@@ -757,6 +757,19 @@ els.autoDistribute.addEventListener('click', () => {
   onParamChange();
 });
 
+// ---------- color count + layer heights + layer colors ----------
+
+const COLOR_PALETTE = [
+  '#f0f0f0', '#e85050', '#4a90e2', '#50c850',
+  '#e8c040', '#9050c8', '#50c8c8', '#202020',
+];
+
+function defaultLayerColors(N) {
+  const out = [];
+  for (let k = 0; k < N; k++) out.push(COLOR_PALETTE[k % COLOR_PALETTE.length]);
+  return out;
+}
+
 // ---------- state ----------
 
 // v3 bump: W slider's meaning is now shape-dependent (radius for cylinder,
@@ -815,19 +828,6 @@ const state = {
   cropPolygon: [],
   cropDragIndex: -1,
 };
-
-// ---------- color count + layer heights + layer colors ----------
-
-const COLOR_PALETTE = [
-  '#f0f0f0', '#e85050', '#4a90e2', '#50c850',
-  '#e8c040', '#9050c8', '#50c8c8', '#202020',
-];
-
-function defaultLayerColors(N) {
-  const out = [];
-  for (let k = 0; k < N; k++) out.push(COLOR_PALETTE[k % COLOR_PALETTE.length]);
-  return out;
-}
 
 const viewer = new Viewer(els.viewport);
 
