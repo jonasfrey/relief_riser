@@ -1,3 +1,4 @@
+// license Jonas Immanuel Frey GPL
 // Build an indexed triangle mesh for a relief plate.
 //
 // Convention: model rests on Z=0, relief rises in +Z, plate spans [0,W] in X
@@ -29,6 +30,11 @@ export function estimateEllipseTriangleCount(Nx, Ny) {
   // 6·Nx when a partial hole adds side walls + inner floor. Use the upper
   // bound so the auto/hard limits don't underestimate.
   return 4 * Nx * (Ny - 1) + 8 * Nx;
+}
+
+export function estimateRectProfileTriangleCount(Nx, Ny) {
+  // outer + inner shells: 4·Nx·(Ny−1); top cap: 2·Nx; bottom + floor fans: 2·Nx
+  return 4 * Nx * (Ny - 1) + 4 * Nx;
 }
 
 export function estimatePolygonPrismTriangleCount(N, NxPerFace, Ny, hasChamfer) {
@@ -1362,4 +1368,167 @@ export function buildEllipseGeometry(heightmap, opts) {
     Ny,
     circumference
   };
+}
+
+// Build a hollow rectangular tube whose outer face receives the relief.
+//
+// opts: { xSize, ySize, thickness, bottomThickness, height }
+//   xSize / ySize  — inner cavity dimensions (mm); outer = inner + 2·thickness
+//   thickness      — wall thickness (mm), grows outward
+//   bottomThickness— floor slab height (mm); defaults to thickness
+//   height         — extrusion height (mm)
+//
+// Perimeter parameterization: Nx columns spaced evenly by arc length around
+// the outer rectangle, starting at (+outerHalfX, −outerHalfY) going CCW:
+//   Face 0: right (+X face)   Face 1: top (+Y face)
+//   Face 2: left  (−X face)   Face 3: bottom (−Y face)
+// The corresponding inner column is at the same relative position on the
+// same face of the inner rectangle, so the wall thickness is uniform on
+// each face. Relief pushes each outer vertex outward along the face normal.
+export function buildRectProfileGeometry(heightmap, opts) {
+  const Nx = heightmap.width;
+  const Ny = heightmap.height;
+  if (Nx < 4 || Ny < 2) {
+    throw new Error('RectProfile mesh requires Nx >= 4 and Ny >= 2');
+  }
+  const xSize = opts.xSize;
+  const ySize = opts.ySize;
+  const B  = opts.thickness;
+  const H  = opts.height;
+  const BF = opts.bottomThickness !== undefined ? opts.bottomThickness : B;
+  if (!(B > 0))  throw new Error('Outside thickness must be positive');
+  if (B >= H)    throw new Error('Outside thickness must be smaller than extrusion height');
+  if (!(BF > 0)) throw new Error('Bottom thickness must be positive');
+  if (BF >= H)   throw new Error('Bottom thickness must be smaller than extrusion height');
+
+  const innerHalfX = xSize / 2;
+  const innerHalfY = ySize / 2;
+  const outerHalfX = innerHalfX + B;
+  const outerHalfY = innerHalfY + B;
+  const outerX = xSize + 2 * B;
+  const outerY = ySize + 2 * B;
+  const innerX = xSize;
+  const innerY = ySize;
+
+  // Cumulative arc lengths at each corner of the outer rectangle
+  const P = 2 * (outerX + outerY);
+  const outerCumLen = [0, outerY, outerY + outerX, 2 * outerY + outerX, P];
+
+  // Precompute per-column positions and outward normals
+  const outXArr  = new Float32Array(Nx);
+  const outYArr  = new Float32Array(Nx);
+  const inXArr   = new Float32Array(Nx);
+  const inYArr   = new Float32Array(Nx);
+  const normXArr = new Float32Array(Nx);
+  const normYArr = new Float32Array(Nx);
+
+  for (let i = 0; i < Nx; i++) {
+    const s = (i / Nx) * P;
+    let face = 0;
+    while (face < 3 && s >= outerCumLen[face + 1]) face++;
+    const faceLen = outerCumLen[face + 1] - outerCumLen[face];
+    const f = faceLen > 0 ? (s - outerCumLen[face]) / faceLen : 0;
+    switch (face) {
+      case 0: // right face: x=+outerHalfX, y from -outerHalfY to +outerHalfY
+        outXArr[i] = outerHalfX; outYArr[i] = -outerHalfY + f * outerY;
+        inXArr[i]  = innerHalfX; inYArr[i]  = -innerHalfY + f * innerY;
+        normXArr[i] = 1; normYArr[i] = 0; break;
+      case 1: // top face: y=+outerHalfY, x from +outerHalfX to -outerHalfX
+        outXArr[i] = outerHalfX - f * outerX; outYArr[i] = outerHalfY;
+        inXArr[i]  = innerHalfX - f * innerX; inYArr[i]  = innerHalfY;
+        normXArr[i] = 0; normYArr[i] = 1; break;
+      case 2: // left face: x=-outerHalfX, y from +outerHalfY to -outerHalfY
+        outXArr[i] = -outerHalfX; outYArr[i] = outerHalfY - f * outerY;
+        inXArr[i]  = -innerHalfX; inYArr[i]  = innerHalfY - f * innerY;
+        normXArr[i] = -1; normYArr[i] = 0; break;
+      default: // bottom face: y=-outerHalfY, x from -outerHalfX to +outerHalfX
+        outXArr[i] = -outerHalfX + f * outerX; outYArr[i] = -outerHalfY;
+        inXArr[i]  = -innerHalfX + f * innerX; inYArr[i]  = -innerHalfY;
+        normXArr[i] = 0; normYArr[i] = -1; break;
+    }
+  }
+
+  const totalVerts = 2 * Nx * Ny + 2;
+  const positions  = new Float32Array(totalVerts * 3);
+  const innerOffset = Nx * Ny;
+
+  // Outer surface: relief pushes each vertex outward along the face normal
+  for (let j = 0; j < Ny; j++) {
+    const z = H - (j / (Ny - 1)) * H;
+    for (let i = 0; i < Nx; i++) {
+      const h  = heightmap.data[i + j * Nx];
+      const vi = (i + j * Nx) * 3;
+      positions[vi]     = outXArr[i] + normXArr[i] * h;
+      positions[vi + 1] = outYArr[i] + normYArr[i] * h;
+      positions[vi + 2] = z;
+    }
+  }
+
+  // Inner surface: smooth, z from H down to BF (floor height)
+  for (let j = 0; j < Ny; j++) {
+    const z = H - (j / (Ny - 1)) * (H - BF);
+    for (let i = 0; i < Nx; i++) {
+      const vi = (innerOffset + i + j * Nx) * 3;
+      positions[vi]     = inXArr[i];
+      positions[vi + 1] = inYArr[i];
+      positions[vi + 2] = z;
+    }
+  }
+
+  // Bottom center (outer fan at z=0) and floor center (inner fan at z=BF)
+  const centerBase   = 2 * Nx * Ny;
+  const bottomCenter = centerBase;
+  const floorCenter  = centerBase + 1;
+  positions[bottomCenter * 3] = 0; positions[bottomCenter * 3 + 1] = 0; positions[bottomCenter * 3 + 2] = 0;
+  positions[floorCenter  * 3] = 0; positions[floorCenter  * 3 + 1] = 0; positions[floorCenter  * 3 + 2] = BF;
+
+  const triCount = 4 * Nx * (Ny - 1) + 4 * Nx;
+  const indices  = new Uint32Array(triCount * 3);
+  let p = 0;
+
+  const wrap  = (i) => (i === Nx ? 0 : i);
+  const outer = (i, j) => wrap(i) + j * Nx;
+  const inner = (i, j) => innerOffset + wrap(i) + j * Nx;
+
+  // Outer surface — outward normals (same winding as ellipse/cylinder)
+  for (let j = 0; j < Ny - 1; j++) {
+    for (let i = 0; i < Nx; i++) {
+      const A = outer(i, j), B_ = outer(i + 1, j);
+      const C = outer(i + 1, j + 1), D = outer(i, j + 1);
+      indices[p++] = A; indices[p++] = D; indices[p++] = C;
+      indices[p++] = A; indices[p++] = C; indices[p++] = B_;
+    }
+  }
+
+  // Inner surface — inward normals (reversed winding)
+  for (let j = 0; j < Ny - 1; j++) {
+    for (let i = 0; i < Nx; i++) {
+      const A = inner(i, j), B_ = inner(i + 1, j);
+      const C = inner(i + 1, j + 1), D = inner(i, j + 1);
+      indices[p++] = A; indices[p++] = C; indices[p++] = D;
+      indices[p++] = A; indices[p++] = B_; indices[p++] = C;
+    }
+  }
+
+  // Top cap — annular outer→inner at z=H, normal +Z
+  for (let i = 0; i < Nx; i++) {
+    const A = outer(i, 0), B_ = outer(i + 1, 0);
+    const C = inner(i + 1, 0), D = inner(i, 0);
+    indices[p++] = A; indices[p++] = B_; indices[p++] = C;
+    indices[p++] = A; indices[p++] = C;  indices[p++] = D;
+  }
+
+  // Bottom disc — outer fan at z=0, normal −Z
+  for (let i = 0; i < Nx; i++) {
+    const A = outer(i, Ny - 1), B_ = outer(i + 1, Ny - 1);
+    indices[p++] = bottomCenter; indices[p++] = B_; indices[p++] = A;
+  }
+
+  // Floor disc — inner fan at z=BF, normal +Z
+  for (let i = 0; i < Nx; i++) {
+    const i0 = inner(i, Ny - 1), i1 = inner(i + 1, Ny - 1);
+    indices[p++] = floorCenter; indices[p++] = i0; indices[p++] = i1;
+  }
+
+  return { positions, indices, triCount, vertCount: totalVerts, Nx, Ny, perimeter: P };
 }

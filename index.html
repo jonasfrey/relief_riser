@@ -327,6 +327,7 @@
               <option value="rectangular" selected>Rectangular plate</option>
               <option value="cylindrical">Cylindrical (image wraps around)</option>
               <option value="ellipse">Ellipse (image wraps around outer face)</option>
+              <option value="rectProfile">Rectangular tube (image wraps around outer face)</option>
               <option value="polygon">Polygon prism (same image on each side)</option>
               <option value="customProfile">Custom profile (revolved DXF)</option>
               <option value="stlWrap">Custom STL wrap (relief on outer surface)</option>
@@ -386,6 +387,35 @@
               <input type="number" id="ellipseBottomHoleNum" min="0" max="100" step="1" value="0" />
             </div>
             <p class="hint">X and Y define the inner cavity dimensions. Wall thickness grows outward, so the outer ellipse = inner + thickness. The image wraps once around the outer face; each greyscale pixel pushes its outer vertex further from the center. Bottom hole is a percentage of the inner X/Y (50% = hole is half the inner size, 100% = fully open).</p>
+          </div>
+
+          <div class="hidden" id="rectProfileControls">
+            <div class="control">
+              <label for="rectProfX">Scale X (mm)</label>
+              <input type="range" id="rectProfX" min="5" max="300" step="0.1" value="40" />
+              <input type="number" id="rectProfXNum" min="5" max="300" step="0.1" value="40" />
+            </div>
+            <div class="control">
+              <label for="rectProfY">Scale Y (mm)</label>
+              <input type="range" id="rectProfY" min="5" max="300" step="0.1" value="25" />
+              <input type="number" id="rectProfYNum" min="5" max="300" step="0.1" value="25" />
+            </div>
+            <div class="control">
+              <label for="rectProfThickness">Outside thickness (mm)</label>
+              <input type="range" id="rectProfThickness" min="0.4" max="20" step="0.1" value="1.5" />
+              <input type="number" id="rectProfThicknessNum" min="0.4" max="20" step="0.1" value="1.5" />
+            </div>
+            <div class="control">
+              <label for="rectProfBottomThickness">Bottom thickness (mm)</label>
+              <input type="range" id="rectProfBottomThickness" min="0.4" max="20" step="0.1" value="1.2" />
+              <input type="number" id="rectProfBottomThicknessNum" min="0.4" max="20" step="0.1" value="1.2" />
+            </div>
+            <div class="control">
+              <label for="rectProfHeight">Extrusion height (mm)</label>
+              <input type="range" id="rectProfHeight" min="1" max="300" step="0.5" value="40" />
+              <input type="number" id="rectProfHeightNum" min="1" max="300" step="0.5" value="40" />
+            </div>
+            <p class="hint">Scale X and Y define the inner cavity dimensions. Wall thickness grows outward, so outer dimensions = inner + 2 × thickness. The image wraps once around all four outer faces; each greyscale pixel pushes its outer vertex away from the face.</p>
           </div>
 
           <div class="hidden" id="customProfileControls">

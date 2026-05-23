@@ -18,12 +18,14 @@ import {
   buildReliefGeometry,
   buildCylindricalGeometry,
   buildEllipseGeometry,
+  buildRectProfileGeometry,
   buildPolygonPrismGeometry,
   buildCustomProfileGeometry,
   buildSTLWrapGeometry,
   estimateTriangleCount,
   estimateCylindricalTriangleCount,
   estimateEllipseTriangleCount,
+  estimateRectProfileTriangleCount,
   estimatePolygonPrismTriangleCount,
   estimateCustomProfileTriangleCount,
   estimateSTLWrapTriangleCount
@@ -109,6 +111,12 @@ const els = {
   ellipseBottomThickness: $('ellipseBottomThickness'), ellipseBottomThicknessNum: $('ellipseBottomThicknessNum'),
   ellipseHeight:          $('ellipseHeight'),          ellipseHeightNum:          $('ellipseHeightNum'),
   ellipseBottomHole:      $('ellipseBottomHole'),      ellipseBottomHoleNum:      $('ellipseBottomHoleNum'),
+  rectProfileControls: $('rectProfileControls'),
+  rectProfX:                $('rectProfX'),                rectProfXNum:                $('rectProfXNum'),
+  rectProfY:                $('rectProfY'),                rectProfYNum:                $('rectProfYNum'),
+  rectProfThickness:        $('rectProfThickness'),        rectProfThicknessNum:        $('rectProfThicknessNum'),
+  rectProfBottomThickness:  $('rectProfBottomThickness'),  rectProfBottomThicknessNum:  $('rectProfBottomThicknessNum'),
+  rectProfHeight:           $('rectProfHeight'),           rectProfHeightNum:           $('rectProfHeightNum'),
   stlWrapControls: $('stlWrapControls'),
   wrapStlFile: $('wrapStlFile'),
   wrapStlResetBtn: $('wrapStlResetBtn'),
@@ -208,7 +216,12 @@ const sliderPairs = [
   ['ellipseThickness',       'ellipseThicknessNum'],
   ['ellipseBottomThickness', 'ellipseBottomThicknessNum'],
   ['ellipseHeight',          'ellipseHeightNum'],
-  ['ellipseBottomHole',      'ellipseBottomHoleNum']
+  ['ellipseBottomHole',      'ellipseBottomHoleNum'],
+  ['rectProfX',                'rectProfXNum'],
+  ['rectProfY',                'rectProfYNum'],
+  ['rectProfThickness',        'rectProfThicknessNum'],
+  ['rectProfBottomThickness',  'rectProfBottomThicknessNum'],
+  ['rectProfHeight',           'rectProfHeightNum']
 ];
 
 function linkPair(rangeEl, numEl) {
@@ -1117,6 +1130,7 @@ function updateShapeLabels() {
   const isCustom = state.shape === 'customProfile';
   const isStlWrap = state.shape === 'stlWrap';
   const isEllipse = state.shape === 'ellipse';
+  const isRectProfile = state.shape === 'rectProfile';
   if (isCyl) {
     els.plateWLabel.textContent = 'Radius R (mm)';
   } else if (isPoly) {
@@ -1130,18 +1144,19 @@ function updateShapeLabels() {
   els.customProfileControls.classList.toggle('hidden', !isCustom);
   if (els.stlWrapControls) els.stlWrapControls.classList.toggle('hidden', !isStlWrap);
   if (els.ellipseControls) els.ellipseControls.classList.toggle('hidden', !isEllipse);
-  // Custom-profile, STL-wrap, and ellipse modes all own their own dimensional
-  // controls, so the plain plate W slider is irrelevant. The H control is
-  // permanently hidden — H is always derived. baseThickness is hidden for
-  // custom profile (not used) and ellipse (replaced by its own thickness
-  // slider); STL wrap and cylindrical still use it.
+  if (els.rectProfileControls) els.rectProfileControls.classList.toggle('hidden', !isRectProfile);
+  // Custom-profile, STL-wrap, ellipse, and rectProfile modes all own their own
+  // dimensional controls, so the plain plate W slider is irrelevant. The H
+  // control is permanently hidden — H is always derived. baseThickness is
+  // hidden for custom profile (not used), ellipse, and rectProfile (each has
+  // its own thickness slider); STL wrap and cylindrical still use it.
   const plateCtl = els.plateW.closest('.control');
   const plateHCtl = els.plateH.closest('.control');
   const baseCtl = els.baseThickness.closest('.control');
-  if (plateCtl)  plateCtl.classList.toggle('hidden', isCustom || isStlWrap || isEllipse);
+  if (plateCtl)  plateCtl.classList.toggle('hidden', isCustom || isStlWrap || isEllipse || isRectProfile);
   if (plateHCtl) plateHCtl.classList.add('hidden');
-  if (baseCtl)   baseCtl.classList.toggle('hidden', isCustom || isEllipse);
-  if (els.derivedDimsHint) els.derivedDimsHint.classList.toggle('hidden', isCustom || isStlWrap || isEllipse);
+  if (baseCtl)   baseCtl.classList.toggle('hidden', isCustom || isEllipse || isRectProfile);
+  if (els.derivedDimsHint) els.derivedDimsHint.classList.toggle('hidden', isCustom || isStlWrap || isEllipse || isRectProfile);
 }
 
 function updateResolutionVisibility() {
@@ -1484,6 +1499,19 @@ function computeDerivedDims() {
     return { actualPlateW, plateH: height, circumference, xSize, ySize, tileX, tileY };
   }
 
+  if (state.shape === 'rectProfile') {
+    const xSize = parseFloat(els.rectProfX.value);
+    const ySize = parseFloat(els.rectProfY.value);
+    const height = parseFloat(els.rectProfHeight.value);
+    const thickness = parseFloat(els.rectProfThickness.value) || 0;
+    if (!(xSize > 0) || !(ySize > 0) || !(height > 0)) return null;
+    const outerX = xSize + 2 * thickness;
+    const outerY = ySize + 2 * thickness;
+    const perimeter = 2 * (outerX + outerY);
+    const actualPlateW = perimeter / tileX;
+    return { actualPlateW, plateH: height, perimeter, xSize, ySize, tileX, tileY };
+  }
+
   if (state.shape === 'stlWrap') {
     if (!state.wrapStlInfo) return null;
     const { maxR, height } = state.wrapStlInfo;
@@ -1619,6 +1647,11 @@ function readParamsFromUI() {
     ellipseBottomThickness: parseFloat(els.ellipseBottomThickness.value) || 1.2,
     ellipseHeight:          parseFloat(els.ellipseHeight.value)          || 40,
     ellipseBottomHole:      parseFloat(els.ellipseBottomHole.value)      || 0,
+    rectProfX:               parseFloat(els.rectProfX.value)               || 40,
+    rectProfY:               parseFloat(els.rectProfY.value)               || 25,
+    rectProfThickness:       parseFloat(els.rectProfThickness.value)       || 1.5,
+    rectProfBottomThickness: parseFloat(els.rectProfBottomThickness.value) || 1.2,
+    rectProfHeight:          parseFloat(els.rectProfHeight.value)          || 40,
     autoCrop: state.autoCrop,
     rotation: state.rotation,
     zoomX: parseFloat(els.zoomSliderX.value) / 100 || 1,
@@ -1664,6 +1697,11 @@ function writeParamsToUI(p) {
   setNum('ellipseBottomThickness', 'ellipseBottomThicknessNum', p.ellipseBottomThickness);
   setNum('ellipseHeight',          'ellipseHeightNum',          p.ellipseHeight);
   setNum('ellipseBottomHole',      'ellipseBottomHoleNum',      p.ellipseBottomHole);
+  setNum('rectProfX',               'rectProfXNum',               p.rectProfX);
+  setNum('rectProfY',               'rectProfYNum',               p.rectProfY);
+  setNum('rectProfThickness',       'rectProfThicknessNum',       p.rectProfThickness);
+  setNum('rectProfBottomThickness', 'rectProfBottomThicknessNum', p.rectProfBottomThickness);
+  setNum('rectProfHeight',          'rectProfHeightNum',          p.rectProfHeight);
   setNum('stlRenderSize', 'stlRenderSizeNum', p.stlRenderSize);
   setNum('tileX', 'tileXNum', p.uiTileX != null ? p.uiTileX : p.tileX);
   setNum('tileY', 'tileYNum', p.tileY);
@@ -1717,7 +1755,7 @@ function writeParamsToUI(p) {
     state.heightSmooth = !!p.heightSmooth;
     if (els.heightSmooth) els.heightSmooth.checked = state.heightSmooth;
   }
-  if (p.shape === 'rectangular' || p.shape === 'cylindrical' || p.shape === 'polygon' || p.shape === 'customProfile' || p.shape === 'stlWrap' || p.shape === 'ellipse') {
+  if (p.shape === 'rectangular' || p.shape === 'cylindrical' || p.shape === 'polygon' || p.shape === 'customProfile' || p.shape === 'stlWrap' || p.shape === 'ellipse' || p.shape === 'rectProfile') {
     state.shape = p.shape;
     els.shape.value = p.shape;
   }
@@ -2055,7 +2093,7 @@ function computeAutoStretchDims() {
     if (!cd) return null;
     baseW = cd.circumference;
     baseH = cd.bandLength;
-  } else if (params.shape === 'cylindrical' || params.shape === 'stlWrap' || params.shape === 'ellipse') {
+  } else if (params.shape === 'cylindrical' || params.shape === 'stlWrap' || params.shape === 'ellipse' || params.shape === 'rectProfile') {
     baseW = params.plateW * params.tileX;
     baseH = params.plateH;
   } else {
@@ -2093,7 +2131,7 @@ function getTargetDims(params) {
     // aspect (circumference/tileX) / bandLength.
     w = dims.circumference;
     h = dims.bandLength;
-  } else if (params.shape === 'cylindrical' || params.shape === 'stlWrap' || params.shape === 'ellipse') {
+  } else if (params.shape === 'cylindrical' || params.shape === 'stlWrap' || params.shape === 'ellipse' || params.shape === 'rectProfile') {
     w = params.plateW * params.tileX;
     h = params.plateH;
   } else {
@@ -2143,6 +2181,7 @@ function estimateTrisForShape(targetW, targetH, shape, sides, hasChamfer, profil
   if (shape === 'cylindrical') return estimateCylindricalTriangleCount(targetW, targetH);
   if (shape === 'stlWrap') return estimateSTLWrapTriangleCount(targetW, targetH);
   if (shape === 'ellipse') return estimateEllipseTriangleCount(targetW, targetH);
+  if (shape === 'rectProfile') return estimateRectProfileTriangleCount(targetW, targetH);
   if (shape === 'polygon') return estimatePolygonPrismTriangleCount(sides, targetW, targetH, hasChamfer);
   if (shape === 'customProfile') {
     // After splicing the outer band (length Ny) into the profile (originally
@@ -2226,7 +2265,7 @@ function regeneratePreview() {
     // rasterizer stamps tileX copies inside that single-rev canvas.
     baseW = customDims.circumference;
     baseH = customDims.bandLength;
-  } else if (params.shape === 'cylindrical' || params.shape === 'ellipse') {
+  } else if (params.shape === 'cylindrical' || params.shape === 'ellipse' || params.shape === 'rectProfile') {
     baseW = params.plateW * params.tileX;
     baseH = params.plateH;
   } else if (params.shape === 'stlWrap') {
@@ -2413,6 +2452,14 @@ function regenerateMesh() {
         height: params.ellipseHeight,
         bottomHolePct: params.ellipseBottomHole
       });
+    } else if (params.shape === 'rectProfile') {
+      geom = buildRectProfileGeometry(heightmap, {
+        xSize: params.rectProfX,
+        ySize: params.rectProfY,
+        thickness: params.rectProfThickness,
+        bottomThickness: params.rectProfBottomThickness,
+        height: params.rectProfHeight
+      });
     } else if (params.shape === 'customProfile') {
       // Resample the outer band to exactly Ny points (one per heightmap row),
       // then splice it back into the profile so all band points sit at known
@@ -2556,6 +2603,12 @@ function exportFilename(ext, params) {
     const ey = stripTrailing(params.ellipseY);
     const eh = stripTrailing(params.ellipseHeight);
     return `${name}_ellipse_${ex}x${ey}xH${eh}_h${f}mm${c}.${ext}`;
+  }
+  if (params.shape === 'rectProfile') {
+    const rx = stripTrailing(params.rectProfX);
+    const ry = stripTrailing(params.rectProfY);
+    const rh = stripTrailing(params.rectProfHeight);
+    return `${name}_rect_${rx}x${ry}xH${rh}_h${f}mm${c}.${ext}`;
   }
   return `${name}_${W}x${H}_h${f}mm${c}.${ext}`;
 }
