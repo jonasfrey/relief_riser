@@ -174,17 +174,19 @@ export function rasterize(sourceCanvas, targetW, targetH, fitMode, opts = {}) {
     dy = marginPxY;
   }
 
-  // Tile size + step. Without overlap, step == size and tiles butt up.
-  // With overlap o on an axis, step = size·(1−o), and size is scaled up so
-  // tileX·step + size·o = total extent (i.e. tiles cover the full inner box
-  // exactly as if overlap = 0, just with each tile a bit larger and shifted).
-  // Closed form: size = total / (tileX − (tileX−1)·o).
-  const denomX = tileX - (tileX - 1) * overlapXFrac;
-  const denomY = tileY - (tileY - 1) * overlapYFrac;
-  const tileSizeX = dw / denomX;
-  const tileSizeY = dh / denomY;
-  const stepX = tileSizeX * (1 - overlapXFrac);
-  const stepY = tileSizeY * (1 - overlapYFrac);
+  // Tile size + step. step is the spacing between tile origins; size is the
+  // actual tile draw size (= step / (1 − o), so adjacent tiles overlap by
+  // o·size). Each logical tile occupies stepX of visible width; the extra
+  // size − step bleeds half into each neighbour. With this layout every
+  // tile boundary (including the canvas edges) lands on the center of an
+  // overlap zone, which lets the wrap seam blend the same way as internal
+  // seams once we draw the ghost tiles at i = -1 and i = tileX (below).
+  const stepX = dw / tileX;
+  const stepY = dh / tileY;
+  const tileSizeX = stepX / (1 - overlapXFrac);
+  const tileSizeY = stepY / (1 - overlapYFrac);
+  const halfOvX = (tileSizeX - stepX) / 2;
+  const halfOvY = (tileSizeY - stepY) / 2;
   const hasOverlap = overlapXFrac > 0 || overlapYFrac > 0;
 
   // With overlap > 0, switch to a per-channel max/min blend so the brighter
@@ -192,19 +194,30 @@ export function rasterize(sourceCanvas, targetW, targetH, fitMode, opts = {}) {
   // i.e. the dark margins act as if transparent. Restored after the loop.
   if (hasOverlap) ctx.globalCompositeOperation = overlapBlend;
 
+  // Ghost tiles: when overlap > 0 on an axis, also draw an extra tile copy
+  // one step before the first visible tile and one step past the last, so
+  // the canvas edges sit inside an overlap blend (matching internal seams).
+  // The off-canvas halves are clipped by drawImage; the on-canvas halves
+  // composite via overlapBlend with the corner tiles. Without these the
+  // wrap seam on a cylinder stays visible.
+  const iStart = overlapXFrac > 0 ? -1 : 0;
+  const iEnd   = overlapXFrac > 0 ? tileX : tileX - 1;
+  const jStart = overlapYFrac > 0 ? -1 : 0;
+  const jEnd   = overlapYFrac > 0 ? tileY : tileY - 1;
+
   // Snap each tile's destination rect to integer pixels. Floating-point tile
   // positions cause drawImage to anti-alias the shared edge against the
   // background fill, leaving a thin low-value seam that the heightmap then
   // reads as a gap between adjacent tiles. With overlap, the blend mode
   // hides any rounding mismatch anyway, but snapping still keeps geometry
   // clean.
-  for (let j = 0; j < tileY; j++) {
-    const y0 = Math.round(dy + j * stepY);
-    const y1 = Math.round(dy + j * stepY + tileSizeY);
+  for (let j = jStart; j <= jEnd; j++) {
+    const y0 = Math.round(dy + j * stepY - halfOvY);
+    const y1 = Math.round(dy + j * stepY - halfOvY + tileSizeY);
     const th = y1 - y0;
-    for (let i = 0; i < tileX; i++) {
-      const x0 = Math.round(dx + i * stepX);
-      const x1 = Math.round(dx + i * stepX + tileSizeX);
+    for (let i = iStart; i <= iEnd; i++) {
+      const x0 = Math.round(dx + i * stepX - halfOvX);
+      const x1 = Math.round(dx + i * stepX - halfOvX + tileSizeX);
       const tw = x1 - x0;
       ctx.drawImage(sourceCanvas, x0, y0, tw, th);
     }
