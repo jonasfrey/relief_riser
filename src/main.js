@@ -83,6 +83,8 @@ const els = {
   maxDimControl: $('maxDimControl'),
   tileX: $('tileX'),                 tileXNum: $('tileXNum'),
   tileY: $('tileY'),                 tileYNum: $('tileYNum'),
+  tileOverlapX: $('tileOverlapX'),   tileOverlapXNum: $('tileOverlapXNum'),
+  tileOverlapY: $('tileOverlapY'),   tileOverlapYNum: $('tileOverlapYNum'),
   marginX: $('marginX'),             marginXNum: $('marginXNum'),
   marginY: $('marginY'),             marginYNum: $('marginYNum'),
   gradFrameTop:    $('gradFrameTop'),    gradFrameTopNum:    $('gradFrameTopNum'),
@@ -193,6 +195,8 @@ const sliderPairs = [
   ['sides', 'sidesNum'],
   ['tileX', 'tileXNum'],
   ['tileY', 'tileYNum'],
+  ['tileOverlapX', 'tileOverlapXNum'],
+  ['tileOverlapY', 'tileOverlapYNum'],
   ['marginX', 'marginXNum'],
   ['marginY', 'marginYNum'],
   ['chamferTop', 'chamferTopNum'],
@@ -1615,6 +1619,8 @@ function readParamsFromUI() {
     // to the user's manual choice, not the auto-fit override.
     uiTileX,
     tileY: parseInt(els.tileY.value, 10) || 1,
+    tileOverlapX: parseFloat(els.tileOverlapX.value) || 0,
+    tileOverlapY: parseFloat(els.tileOverlapY.value) || 0,
     marginX: parseFloat(els.marginX.value) || 0,
     marginY: parseFloat(els.marginY.value) || 0,
     gradFrameTop:    parseFloat(els.gradFrameTop.value)    || 0,
@@ -1706,6 +1712,8 @@ function writeParamsToUI(p) {
   setNum('stlRenderSize', 'stlRenderSizeNum', p.stlRenderSize);
   setNum('tileX', 'tileXNum', p.uiTileX != null ? p.uiTileX : p.tileX);
   setNum('tileY', 'tileYNum', p.tileY);
+  setNum('tileOverlapX', 'tileOverlapXNum', p.tileOverlapX);
+  setNum('tileOverlapY', 'tileOverlapYNum', p.tileOverlapY);
   setNum('marginX', 'marginXNum', p.marginX);
   setNum('marginY', 'marginYNum', p.marginY);
   setNum('gradFrameTop',    'gradFrameTopNum',    p.gradFrameTop);
@@ -2321,6 +2329,15 @@ function regeneratePreview() {
     marginPxX,
     marginPxY,
     fillColor,
+    // Negative-margin overlap between adjacent tiles. Composite mode picks
+    // the brighter (lighten) or darker (darken) pixel in the overlap zone
+    // depending on which polarity maps to flat: with a black fill the dark
+    // margins should yield to bright content, so we lighten; with white
+    // fill it's the inverse. Only applied in the flat-tiled path; closed
+    // revolved surfaces (perTileFit) skip overlap so wraps stay seamless.
+    overlapXFrac: (params.tileOverlapX || 0) / 100,
+    overlapYFrac: (params.tileOverlapY || 0) / 100,
+    overlapBlend: fillColor === '#000000' ? 'lighten' : 'darken',
     // Closed revolved surfaces: each tile must literally cover its share of
     // the circumference, so fit each tile in its own box rather than fitting
     // the combined tiled-source aspect into the canvas (which would

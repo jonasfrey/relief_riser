@@ -90,6 +90,18 @@ export function rasterize(sourceCanvas, targetW, targetH, fitMode, opts = {}) {
   const marginPxY = Math.max(0, Math.round(opts.marginPxY || 0));
   const fillColor = opts.fillColor || '#ffffff';
   const perTileFit = !!opts.perTileFit;
+  // Tile overlap: each axis fraction in [0, 0.49]. With overlap o, adjacent
+  // tiles are offset by tileSize·(1−o) instead of tileSize, so neighbouring
+  // tiles share o·tileSize of pixels. Each tile is scaled up so the total
+  // tiled extent still fills the inner box — the overall plate dimensions
+  // don't change when overlap is dialed up.
+  // overlapBlend ∈ {'lighten','darken','source-over'} picks how overlapping
+  // pixels combine. 'lighten' = per-channel max (right when fill is dark, so
+  // dark margins lose to bright content). 'darken' = min (right for white
+  // fill). 'source-over' = last-tile-wins (default, unused here but harmless).
+  const overlapXFrac = Math.max(0, Math.min(0.49, opts.overlapXFrac || 0));
+  const overlapYFrac = Math.max(0, Math.min(0.49, opts.overlapYFrac || 0));
+  const overlapBlend = opts.overlapBlend || 'lighten';
 
   const canvas = document.createElement('canvas');
   canvas.width = targetW;
@@ -162,23 +174,43 @@ export function rasterize(sourceCanvas, targetW, targetH, fitMode, opts = {}) {
     dy = marginPxY;
   }
 
+  // Tile size + step. Without overlap, step == size and tiles butt up.
+  // With overlap o on an axis, step = size·(1−o), and size is scaled up so
+  // tileX·step + size·o = total extent (i.e. tiles cover the full inner box
+  // exactly as if overlap = 0, just with each tile a bit larger and shifted).
+  // Closed form: size = total / (tileX − (tileX−1)·o).
+  const denomX = tileX - (tileX - 1) * overlapXFrac;
+  const denomY = tileY - (tileY - 1) * overlapYFrac;
+  const tileSizeX = dw / denomX;
+  const tileSizeY = dh / denomY;
+  const stepX = tileSizeX * (1 - overlapXFrac);
+  const stepY = tileSizeY * (1 - overlapYFrac);
+  const hasOverlap = overlapXFrac > 0 || overlapYFrac > 0;
+
+  // With overlap > 0, switch to a per-channel max/min blend so the brighter
+  // (or darker) content from neighbouring tiles wins in the overlap zone —
+  // i.e. the dark margins act as if transparent. Restored after the loop.
+  if (hasOverlap) ctx.globalCompositeOperation = overlapBlend;
+
   // Snap each tile's destination rect to integer pixels. Floating-point tile
   // positions cause drawImage to anti-alias the shared edge against the
-  // black background fill, leaving a thin low-value seam that the heightmap
-  // then reads as a gap between adjacent tiles. By computing each tile's
-  // pixel-aligned x0/x1 (and y0/y1) so adjacent tiles share the same integer
-  // boundary, the seam is exact and no fill color bleeds through.
+  // background fill, leaving a thin low-value seam that the heightmap then
+  // reads as a gap between adjacent tiles. With overlap, the blend mode
+  // hides any rounding mismatch anyway, but snapping still keeps geometry
+  // clean.
   for (let j = 0; j < tileY; j++) {
-    const y0 = Math.round(dy + j * dh / tileY);
-    const y1 = Math.round(dy + (j + 1) * dh / tileY);
+    const y0 = Math.round(dy + j * stepY);
+    const y1 = Math.round(dy + j * stepY + tileSizeY);
     const th = y1 - y0;
     for (let i = 0; i < tileX; i++) {
-      const x0 = Math.round(dx + i * dw / tileX);
-      const x1 = Math.round(dx + (i + 1) * dw / tileX);
+      const x0 = Math.round(dx + i * stepX);
+      const x1 = Math.round(dx + i * stepX + tileSizeX);
       const tw = x1 - x0;
       ctx.drawImage(sourceCanvas, x0, y0, tw, th);
     }
   }
+
+  if (hasOverlap) ctx.globalCompositeOperation = 'source-over';
 
   return canvas;
 }

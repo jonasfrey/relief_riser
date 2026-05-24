@@ -289,6 +289,19 @@
           </div>
 
           <div class="control">
+            <label for="tileOverlapX">Tile overlap X (% of tile)</label>
+            <input type="range" id="tileOverlapX" min="0" max="49" step="0.5" value="0" />
+            <input type="number" id="tileOverlapXNum" min="0" max="49" step="0.5" value="0" />
+          </div>
+
+          <div class="control">
+            <label for="tileOverlapY">Tile overlap Y (% of tile)</label>
+            <input type="range" id="tileOverlapY" min="0" max="49" step="0.5" value="0" />
+            <input type="number" id="tileOverlapYNum" min="0" max="49" step="0.5" value="0" />
+          </div>
+          <p class="hint">Adjacent tiles overlap by this fraction of one tile. The overlap zone takes the per-pixel max (or min, when relief maps from black), so dark margins act transparent and bright content from one tile bleeds into the next. Use to hide flat margins around the subject in your source.</p>
+
+          <div class="control">
             <label for="marginX">Margin X (mm)</label>
             <input type="range" id="marginX" min="0" max="50" step="0.1" value="2" />
             <input type="number" id="marginXNum" min="0" max="50" step="0.1" value="2" />
