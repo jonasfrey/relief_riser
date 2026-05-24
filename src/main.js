@@ -13,6 +13,7 @@ import {
 } from './imageProcessor.js';
 import { loadSTLFromFile, loadSTLFromUrl } from './stlReader.js';
 import { loadGLBFromFile } from './glbReader.js';
+import { loadOBJFromFile } from './objReader.js';
 import { projectSTLToCanvas } from './stlProjector.js';
 import {
   buildReliefGeometry,
@@ -1875,7 +1876,7 @@ els.dropZone.addEventListener('drop', (e) => {
   const file = e.dataTransfer.files && e.dataTransfer.files[0];
   if (!file) return;
   const isImg = /^image\//.test(file.type);
-  const isMesh = /\.(stl|glb)$/i.test(file.name);
+  const isMesh = /\.(stl|glb|obj)$/i.test(file.name);
   if (isImg || isMesh) handleFile(file);
 });
 
@@ -1897,8 +1898,13 @@ async function handleFile(file) {
     const lower = file.name.toLowerCase();
     const isStl = lower.endsWith('.stl');
     const isGlb = lower.endsWith('.glb');
-    if (isStl || isGlb) {
-      const mesh = isStl ? await loadSTLFromFile(file) : await loadGLBFromFile(file);
+    const isObj = lower.endsWith('.obj');
+    if (isStl || isGlb || isObj) {
+      const mesh = isStl
+        ? await loadSTLFromFile(file)
+        : isGlb
+          ? await loadGLBFromFile(file)
+          : await loadOBJFromFile(file);
       state.stlData = mesh;
       state.inputType = 'stl';   // kept for backward-compat — same code path
       const size = currentStlRenderSize();
