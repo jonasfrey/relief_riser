@@ -1553,3 +1553,54 @@ export function buildRectProfileGeometry(heightmap, opts) {
 
   return { positions, indices, triCount, vertCount: totalVerts, Nx, Ny, perimeter: P };
 }
+
+// Tile a finished geometry along +Y. Each copy is shifted by step = bboxY +
+// offsetMm, and the whole assembly is recentered so the original Y center is
+// preserved (useful for rectangular tube arrays, lithophane racks, etc).
+// vertexColors are replicated alongside the positions/indices.
+// count <= 1 returns the inputs unchanged.
+export function replicateGeometryY(geom, vertexColors, count, offsetMm) {
+  if (!geom || count <= 1) return { geom, vertexColors };
+  const verts = geom.positions.length / 3;
+  const idxLen = geom.indices.length;
+  let minY = Infinity, maxY = -Infinity;
+  for (let v = 0; v < verts; v++) {
+    const y = geom.positions[v * 3 + 1];
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+  const bboxY = maxY - minY;
+  const step = bboxY + (offsetMm || 0);
+  const cOff = (count - 1) / 2;
+
+  const newPositions = new Float32Array(geom.positions.length * count);
+  const newIndices   = new Uint32Array(idxLen * count);
+  const newColors    = vertexColors ? new Float32Array(vertexColors.length * count) : null;
+
+  for (let k = 0; k < count; k++) {
+    const vBase = k * verts;
+    const pBase = vBase * 3;
+    const dy = (k - cOff) * step;
+    for (let v = 0; v < verts; v++) {
+      newPositions[pBase + v * 3]     = geom.positions[v * 3];
+      newPositions[pBase + v * 3 + 1] = geom.positions[v * 3 + 1] + dy;
+      newPositions[pBase + v * 3 + 2] = geom.positions[v * 3 + 2];
+    }
+    const iBase = k * idxLen;
+    for (let t = 0; t < idxLen; t++) {
+      newIndices[iBase + t] = geom.indices[t] + vBase;
+    }
+    if (newColors) newColors.set(vertexColors, vBase * 3);
+  }
+
+  const newGeom = {
+    ...geom,
+    positions: newPositions,
+    indices: newIndices,
+    triCount: (geom.triCount || idxLen / 3) * count,
+    vertCount: verts * count,
+    repeatYCount: count,
+    repeatYStep: step
+  };
+  return { geom: newGeom, vertexColors: newColors };
+}

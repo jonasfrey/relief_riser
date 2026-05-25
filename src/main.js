@@ -23,6 +23,7 @@ import {
   buildPolygonPrismGeometry,
   buildCustomProfileGeometry,
   buildSTLWrapGeometry,
+  replicateGeometryY,
   estimateTriangleCount,
   estimateCylindricalTriangleCount,
   estimateEllipseTriangleCount,
@@ -85,6 +86,8 @@ const els = {
   tileY: $('tileY'),                 tileYNum: $('tileYNum'),
   tileOverlapX: $('tileOverlapX'),   tileOverlapXNum: $('tileOverlapXNum'),
   tileOverlapY: $('tileOverlapY'),   tileOverlapYNum: $('tileOverlapYNum'),
+  repeatYCount: $('repeatYCount'),   repeatYCountNum: $('repeatYCountNum'),
+  repeatYOffset: $('repeatYOffset'), repeatYOffsetNum: $('repeatYOffsetNum'),
   marginX: $('marginX'),             marginXNum: $('marginXNum'),
   marginY: $('marginY'),             marginYNum: $('marginYNum'),
   gradFrameTop:    $('gradFrameTop'),    gradFrameTopNum:    $('gradFrameTopNum'),
@@ -197,6 +200,8 @@ const sliderPairs = [
   ['tileY', 'tileYNum'],
   ['tileOverlapX', 'tileOverlapXNum'],
   ['tileOverlapY', 'tileOverlapYNum'],
+  ['repeatYCount', 'repeatYCountNum'],
+  ['repeatYOffset', 'repeatYOffsetNum'],
   ['marginX', 'marginXNum'],
   ['marginY', 'marginYNum'],
   ['chamferTop', 'chamferTopNum'],
@@ -1621,6 +1626,8 @@ function readParamsFromUI() {
     tileY: parseInt(els.tileY.value, 10) || 1,
     tileOverlapX: parseFloat(els.tileOverlapX.value) || 0,
     tileOverlapY: parseFloat(els.tileOverlapY.value) || 0,
+    repeatYCount: Math.max(1, parseInt(els.repeatYCount.value, 10) || 1),
+    repeatYOffset: Number.isFinite(parseFloat(els.repeatYOffset.value)) ? parseFloat(els.repeatYOffset.value) : 0,
     marginX: parseFloat(els.marginX.value) || 0,
     marginY: parseFloat(els.marginY.value) || 0,
     gradFrameTop:    parseFloat(els.gradFrameTop.value)    || 0,
@@ -1714,6 +1721,8 @@ function writeParamsToUI(p) {
   setNum('tileY', 'tileYNum', p.tileY);
   setNum('tileOverlapX', 'tileOverlapXNum', p.tileOverlapX);
   setNum('tileOverlapY', 'tileOverlapYNum', p.tileOverlapY);
+  setNum('repeatYCount',  'repeatYCountNum',  p.repeatYCount);
+  setNum('repeatYOffset', 'repeatYOffsetNum', p.repeatYOffset);
   setNum('marginX', 'marginXNum', p.marginX);
   setNum('marginY', 'marginYNum', p.marginY);
   setNum('gradFrameTop',    'gradFrameTopNum',    p.gradFrameTop);
@@ -2224,7 +2233,8 @@ function triggerProcessing(immediate) {
   const params = readParamsFromUI();
   const { targetW, targetH } = getTargetDims(params);
   const profileLen = state.profilePoints ? state.profilePoints.length : 0;
-  const tris = estimateTrisForShape(targetW, targetH, params.shape, params.sides, params.chamferTop > 0, profileLen);
+  const tris = estimateTrisForShape(targetW, targetH, params.shape, params.sides, params.chamferTop > 0, profileLen)
+    * Math.max(1, params.repeatYCount | 0 || 1);
 
   if (tris > TRI_HARD_LIMIT) {
     showWarning(
@@ -2510,10 +2520,18 @@ function regenerateMesh() {
     return;
   }
 
-  state.geometry = geom;
+  // Build vertex colors from the single-tile geometry first (the color
+  // builder relies on Nx*Ny being the outer-surface block), then tile the
+  // geometry and the colors together along Y.
+  let vertexColors = buildVertexColors(geom, state.processed);
+  const repeatN = Math.max(1, params.repeatYCount | 0 || 1);
+  if (repeatN > 1) {
+    const r = replicateGeometryY(geom, vertexColors, repeatN, params.repeatYOffset || 0);
+    geom = r.geom;
+    vertexColors = r.vertexColors;
+  }
 
-  // Build vertex colors from levelMap (outer surface = first Nx*Ny vertices).
-  const vertexColors = buildVertexColors(geom, state.processed);
+  state.geometry = geom;
   viewer.setMesh(geom.positions, geom.indices, vertexColors);
 
   setExportEnabled(true);
