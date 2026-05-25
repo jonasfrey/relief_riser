@@ -139,6 +139,7 @@ const els = {
   radiusFactor: $('radiusFactor'),   radiusFactorNum: $('radiusFactorNum'),
   heightFactor: $('heightFactor'),   heightFactorNum: $('heightFactorNum'),
   outerBandFrac: $('outerBandFrac'), outerBandFracNum: $('outerBandFracNum'),
+  customAutoTileY: $('customAutoTileY'),
   plateW: $('plateW'),               plateWNum: $('plateWNum'),
   plateWLabel: $('plateWLabel'),
   derivedDimsHint: $('derivedDimsHint'),
@@ -265,7 +266,7 @@ function clampToInputRange(el, v) {
 
 sliderPairs.forEach(([r, n]) => linkPair(els[r], els[n]));
 
-['invert', 'mapDir', 'fitMode', 'closedBottom', 'interpX', 'interpY', 'repeatAxis'].forEach((id) => {
+['invert', 'mapDir', 'fitMode', 'closedBottom', 'interpX', 'interpY', 'repeatAxis', 'customAutoTileY'].forEach((id) => {
   els[id].addEventListener('change', () => onParamChange());
 });
 
@@ -1559,9 +1560,34 @@ function computeDerivedDims() {
 // of the pipeline reads them through readParamsFromUI) and update the hint
 // shown next to the W control. Safe to call when no image is loaded yet.
 function applyDerivedDims() {
+  if (state.shape === 'customProfile' && els.derivedDimsHint) {
+    const cd = customProfileDims({
+      radiusFactor: parseFloat(els.radiusFactor.value) || 1,
+      heightFactor: parseFloat(els.heightFactor.value) || 1,
+      outerBandFrac: parseFloat(els.outerBandFrac.value) || 50
+    });
+    if (cd && els.customAutoTileY && els.customAutoTileY.checked && state.sourceCanvas) {
+      const crop = currentCropRect();
+      const imgW = state.sourceCanvas.width * crop.fX;
+      const imgH = state.sourceCanvas.height * crop.fY;
+      const tileX = parseInt(els.tileX.value, 10) || 1;
+      let derivedTileY = '?';
+      if (imgW > 0 && imgH > 0 && cd.circumference > 0) {
+        const ideal = (tileX * cd.bandLength * imgH) / (cd.circumference * imgW);
+        derivedTileY = Math.max(1, Math.min(60, Math.round(ideal) || 1));
+      }
+      els.derivedDimsHint.textContent =
+        `→ circumference ${cd.circumference.toFixed(1)} mm · band ${cd.bandLength.toFixed(1)} mm · auto Repeat Y = ${derivedTileY}`;
+    } else if (cd) {
+      els.derivedDimsHint.textContent =
+        `→ circumference ${cd.circumference.toFixed(1)} mm · band ${cd.bandLength.toFixed(1)} mm`;
+    } else {
+      els.derivedDimsHint.textContent = '';
+    }
+  }
   const dims = computeDerivedDims();
   if (!dims) {
-    if (els.derivedDimsHint) els.derivedDimsHint.textContent = '';
+    if (state.shape !== 'customProfile' && els.derivedDimsHint) els.derivedDimsHint.textContent = '';
     return;
   }
   // Write raw (unrounded) so the tile aspect is preserved exactly. The H
@@ -1605,6 +1631,28 @@ function readParamsFromUI() {
   const effectiveTileX = (state.shape === 'stlWrap' && derived && derived.autoTileX != null)
     ? derived.autoTileX
     : uiTileX;
+  // Custom-profile auto Y: lock the axial tile size to the circumferential
+  // tile size so the same image, when applied to profiles that differ only
+  // in height, keeps each tile the same physical mm. Just changes how many
+  // rows fit. tileY = round(tileX × bandLength × imgH / (circumference × imgW)).
+  const uiTileY = parseInt(els.tileY.value, 10) || 1;
+  let effectiveTileY = uiTileY;
+  if (state.shape === 'customProfile' && els.customAutoTileY && els.customAutoTileY.checked && state.sourceCanvas) {
+    const cd = customProfileDims({
+      radiusFactor: parseFloat(els.radiusFactor.value) || 1,
+      heightFactor: parseFloat(els.heightFactor.value) || 1,
+      outerBandFrac: parseFloat(els.outerBandFrac.value) || 50
+    });
+    if (cd && cd.circumference > 0) {
+      const crop = currentCropRect();
+      const imgW = state.sourceCanvas.width * crop.fX;
+      const imgH = state.sourceCanvas.height * crop.fY;
+      if (imgW > 0 && imgH > 0) {
+        const ideal = (uiTileX * cd.bandLength * imgH) / (cd.circumference * imgW);
+        effectiveTileY = Math.max(1, Math.min(60, Math.round(ideal) || 1));
+      }
+    }
+  }
   return {
     brightness: parseFloat(els.brightness.value),
     contrast: parseFloat(els.contrast.value),
@@ -1624,7 +1672,9 @@ function readParamsFromUI() {
     // Persist the raw slider value too — on restore we want the slider back
     // to the user's manual choice, not the auto-fit override.
     uiTileX,
-    tileY: parseInt(els.tileY.value, 10) || 1,
+    tileY: effectiveTileY,
+    uiTileY,
+    customAutoTileY: !!(els.customAutoTileY && els.customAutoTileY.checked),
     tileOverlapX: parseFloat(els.tileOverlapX.value) || 0,
     tileOverlapY: parseFloat(els.tileOverlapY.value) || 0,
     repeatCount: Math.max(1, parseInt(els.repeatCount.value, 10) || 1),
@@ -1720,7 +1770,8 @@ function writeParamsToUI(p) {
   setNum('rectProfHeight',          'rectProfHeightNum',          p.rectProfHeight);
   setNum('stlRenderSize', 'stlRenderSizeNum', p.stlRenderSize);
   setNum('tileX', 'tileXNum', p.uiTileX != null ? p.uiTileX : p.tileX);
-  setNum('tileY', 'tileYNum', p.tileY);
+  setNum('tileY', 'tileYNum', p.uiTileY != null ? p.uiTileY : p.tileY);
+  if (els.customAutoTileY && p.customAutoTileY != null) els.customAutoTileY.checked = !!p.customAutoTileY;
   setNum('tileOverlapX', 'tileOverlapXNum', p.tileOverlapX);
   setNum('tileOverlapY', 'tileOverlapYNum', p.tileOverlapY);
   setNum('repeatCount',  'repeatCountNum',  p.repeatCount);

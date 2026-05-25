@@ -466,7 +466,13 @@
               <input type="range" id="outerBandFrac" min="1" max="100" step="1" value="50" />
               <input type="number" id="outerBandFracNum" min="1" max="100" step="1" value="50" />
             </div>
-            <p class="hint">DXF should be a single closed loop of LINE / ARC / CIRCLE / ELLIPSE / LWPOLYLINE entities. Profile X = radial distance from rotation (Z) axis; Profile Y = axial coord. The "outer band" (right-facing arc whose X is within this fraction of max X) gets the relief offset.</p>
+            <div class="control inline">
+              <label>
+                <input type="checkbox" id="customAutoTileY" />
+                Auto Repeat Y to keep tile physical size constant
+              </label>
+            </div>
+            <p class="hint">DXF should be a single closed loop of LINE / ARC / CIRCLE / ELLIPSE / LWPOLYLINE entities. Profile X = radial distance from rotation (Z) axis; Profile Y = axial coord. The "outer band" (right-facing arc whose X is within this fraction of max X) gets the relief offset. With Auto Repeat Y on, swapping profiles only changes how many rows fit; one tile stays the same physical size.</p>
           </div>
 
           <div class="control hidden" id="sidesControl">
