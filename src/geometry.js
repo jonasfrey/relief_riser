@@ -1375,7 +1375,9 @@ export function buildEllipseGeometry(heightmap, opts) {
 // opts: { xSize, ySize, thickness, bottomThickness, height }
 //   xSize / ySize  — inner cavity dimensions (mm); outer = inner + 2·thickness
 //   thickness      — wall thickness (mm), grows outward
-//   bottomThickness— floor slab height (mm); defaults to thickness
+//   bottomThickness— floor slab height (mm); defaults to thickness.
+//                    Set to 0 for a fully open bottom (cavity all the way
+//                    through, producing a rectangular through-hole).
 //   height         — extrusion height (mm)
 //
 // Perimeter parameterization: Nx columns spaced evenly by arc length around
@@ -1398,8 +1400,9 @@ export function buildRectProfileGeometry(heightmap, opts) {
   const BF = opts.bottomThickness !== undefined ? opts.bottomThickness : B;
   if (!(B > 0))  throw new Error('Outside thickness must be positive');
   if (B >= H)    throw new Error('Outside thickness must be smaller than extrusion height');
-  if (!(BF > 0)) throw new Error('Bottom thickness must be positive');
+  if (BF < 0)    throw new Error('Bottom thickness must be ≥ 0');
   if (BF >= H)   throw new Error('Bottom thickness must be smaller than extrusion height');
+  const openBottom = BF < 1e-9;
 
   const innerHalfX = xSize / 2;
   const innerHalfY = ySize / 2;
@@ -1448,9 +1451,13 @@ export function buildRectProfileGeometry(heightmap, opts) {
     }
   }
 
-  const totalVerts = 2 * Nx * Ny + 2;
+  // openBottom skips the two fan centers — bottom becomes an annular ring.
+  const extraVerts = openBottom ? 0 : 2;
+  const totalVerts = 2 * Nx * Ny + extraVerts;
   const positions  = new Float32Array(totalVerts * 3);
   const innerOffset = Nx * Ny;
+  // Inner cavity z bottom: floor at z=BF normally; z=0 when bottom is open.
+  const innerZBottom = openBottom ? 0 : BF;
 
   // Outer surface: relief pushes each vertex outward along the face normal
   for (let j = 0; j < Ny; j++) {
@@ -1464,9 +1471,9 @@ export function buildRectProfileGeometry(heightmap, opts) {
     }
   }
 
-  // Inner surface: smooth, z from H down to BF (floor height)
+  // Inner surface: smooth, z from H down to innerZBottom (floor or 0).
   for (let j = 0; j < Ny; j++) {
-    const z = H - (j / (Ny - 1)) * (H - BF);
+    const z = H - (j / (Ny - 1)) * (H - innerZBottom);
     for (let i = 0; i < Nx; i++) {
       const vi = (innerOffset + i + j * Nx) * 3;
       positions[vi]     = inXArr[i];
@@ -1475,13 +1482,17 @@ export function buildRectProfileGeometry(heightmap, opts) {
     }
   }
 
-  // Bottom center (outer fan at z=0) and floor center (inner fan at z=BF)
-  const centerBase   = 2 * Nx * Ny;
-  const bottomCenter = centerBase;
-  const floorCenter  = centerBase + 1;
-  positions[bottomCenter * 3] = 0; positions[bottomCenter * 3 + 1] = 0; positions[bottomCenter * 3 + 2] = 0;
-  positions[floorCenter  * 3] = 0; positions[floorCenter  * 3 + 1] = 0; positions[floorCenter  * 3 + 2] = BF;
+  let bottomCenter = -1, floorCenter = -1;
+  if (!openBottom) {
+    // Bottom center (outer fan at z=0) and floor center (inner fan at z=BF)
+    const centerBase = 2 * Nx * Ny;
+    bottomCenter = centerBase;
+    floorCenter  = centerBase + 1;
+    positions[bottomCenter * 3] = 0; positions[bottomCenter * 3 + 1] = 0; positions[bottomCenter * 3 + 2] = 0;
+    positions[floorCenter  * 3] = 0; positions[floorCenter  * 3 + 1] = 0; positions[floorCenter  * 3 + 2] = BF;
+  }
 
+  // Same total either way: 2 fan tris/i (sealed) ≡ 2 ring tris/i (open).
   const triCount = 4 * Nx * (Ny - 1) + 4 * Nx;
   const indices  = new Uint32Array(triCount * 3);
   let p = 0;
@@ -1518,16 +1529,26 @@ export function buildRectProfileGeometry(heightmap, opts) {
     indices[p++] = A; indices[p++] = C;  indices[p++] = D;
   }
 
-  // Bottom disc — outer fan at z=0, normal −Z
-  for (let i = 0; i < Nx; i++) {
-    const A = outer(i, Ny - 1), B_ = outer(i + 1, Ny - 1);
-    indices[p++] = bottomCenter; indices[p++] = B_; indices[p++] = A;
-  }
-
-  // Floor disc — inner fan at z=BF, normal +Z
-  for (let i = 0; i < Nx; i++) {
-    const i0 = inner(i, Ny - 1), i1 = inner(i + 1, Ny - 1);
-    indices[p++] = floorCenter; indices[p++] = i0; indices[p++] = i1;
+  if (openBottom) {
+    // Open bottom: annular outer→inner ring at z=0 (normal −Z, reverse
+    // winding vs. top cap). The cavity becomes a through-hole.
+    for (let i = 0; i < Nx; i++) {
+      const A = outer(i, Ny - 1),     B_ = outer(i + 1, Ny - 1);
+      const C = inner(i + 1, Ny - 1), D = inner(i, Ny - 1);
+      indices[p++] = A; indices[p++] = C; indices[p++] = B_;
+      indices[p++] = A; indices[p++] = D; indices[p++] = C;
+    }
+  } else {
+    // Bottom disc — outer fan at z=0, normal −Z
+    for (let i = 0; i < Nx; i++) {
+      const A = outer(i, Ny - 1), B_ = outer(i + 1, Ny - 1);
+      indices[p++] = bottomCenter; indices[p++] = B_; indices[p++] = A;
+    }
+    // Floor disc — inner fan at z=BF, normal +Z
+    for (let i = 0; i < Nx; i++) {
+      const i0 = inner(i, Ny - 1), i1 = inner(i + 1, Ny - 1);
+      indices[p++] = floorCenter; indices[p++] = i0; indices[p++] = i1;
+    }
   }
 
   return { positions, indices, triCount, vertCount: totalVerts, Nx, Ny, perimeter: P };

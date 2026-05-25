@@ -1657,7 +1657,7 @@ function readParamsFromUI() {
     rectProfX:               parseFloat(els.rectProfX.value)               || 40,
     rectProfY:               parseFloat(els.rectProfY.value)               || 25,
     rectProfThickness:       parseFloat(els.rectProfThickness.value)       || 1.5,
-    rectProfBottomThickness: parseFloat(els.rectProfBottomThickness.value) || 1.2,
+    rectProfBottomThickness: Number.isFinite(parseFloat(els.rectProfBottomThickness.value)) ? parseFloat(els.rectProfBottomThickness.value) : 1.2,
     rectProfHeight:          parseFloat(els.rectProfHeight.value)          || 40,
     autoCrop: state.autoCrop,
     rotation: state.rotation,
