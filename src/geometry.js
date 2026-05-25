@@ -1554,23 +1554,24 @@ export function buildRectProfileGeometry(heightmap, opts) {
   return { positions, indices, triCount, vertCount: totalVerts, Nx, Ny, perimeter: P };
 }
 
-// Tile a finished geometry along +Y. Each copy is shifted by step = bboxY +
-// offsetMm, and the whole assembly is recentered so the original Y center is
-// preserved (useful for rectangular tube arrays, lithophane racks, etc).
-// vertexColors are replicated alongside the positions/indices.
-// count <= 1 returns the inputs unchanged.
-export function replicateGeometryY(geom, vertexColors, count, offsetMm) {
+// Tile a finished geometry along the given world axis. Each copy is shifted
+// by step = bbox(axis) + offsetMm, and the whole assembly is recentered so
+// the original center on that axis is preserved. vertexColors are
+// replicated alongside positions/indices. count <= 1 returns inputs as-is.
+// axis: 'x' | 'y' | 'z' (default 'y').
+export function replicateGeometry(geom, vertexColors, count, offsetMm, axis = 'y') {
   if (!geom || count <= 1) return { geom, vertexColors };
+  const ax = axis === 'x' ? 0 : axis === 'z' ? 2 : 1;
   const verts = geom.positions.length / 3;
   const idxLen = geom.indices.length;
-  let minY = Infinity, maxY = -Infinity;
+  let lo = Infinity, hi = -Infinity;
   for (let v = 0; v < verts; v++) {
-    const y = geom.positions[v * 3 + 1];
-    if (y < minY) minY = y;
-    if (y > maxY) maxY = y;
+    const c = geom.positions[v * 3 + ax];
+    if (c < lo) lo = c;
+    if (c > hi) hi = c;
   }
-  const bboxY = maxY - minY;
-  const step = bboxY + (offsetMm || 0);
+  const bbox = hi - lo;
+  const step = bbox + (offsetMm || 0);
   const cOff = (count - 1) / 2;
 
   const newPositions = new Float32Array(geom.positions.length * count);
@@ -1580,11 +1581,12 @@ export function replicateGeometryY(geom, vertexColors, count, offsetMm) {
   for (let k = 0; k < count; k++) {
     const vBase = k * verts;
     const pBase = vBase * 3;
-    const dy = (k - cOff) * step;
+    const delta = (k - cOff) * step;
     for (let v = 0; v < verts; v++) {
       newPositions[pBase + v * 3]     = geom.positions[v * 3];
-      newPositions[pBase + v * 3 + 1] = geom.positions[v * 3 + 1] + dy;
+      newPositions[pBase + v * 3 + 1] = geom.positions[v * 3 + 1];
       newPositions[pBase + v * 3 + 2] = geom.positions[v * 3 + 2];
+      newPositions[pBase + v * 3 + ax] += delta;
     }
     const iBase = k * idxLen;
     for (let t = 0; t < idxLen; t++) {
@@ -1599,8 +1601,9 @@ export function replicateGeometryY(geom, vertexColors, count, offsetMm) {
     indices: newIndices,
     triCount: (geom.triCount || idxLen / 3) * count,
     vertCount: verts * count,
-    repeatYCount: count,
-    repeatYStep: step
+    repeatCount: count,
+    repeatAxis: axis,
+    repeatStep: step
   };
   return { geom: newGeom, vertexColors: newColors };
 }
