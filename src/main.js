@@ -57,6 +57,9 @@ const els = {
   dropZone: $('dropZone'),
   originalCanvas: $('originalCanvas'),
   processedCanvas: $('processedCanvas'),
+  surfaceDimsLabel: $('surfaceDimsLabel'),
+  surfaceUnwrapHint: $('surfaceUnwrapHint'),
+  showTileSeams: $('showTileSeams'),
   histogramCanvas: $('histogramCanvas'),
   showClipping: $('showClipping'),
   cropPolyStatus: $('cropPolyStatus'),
@@ -293,6 +296,16 @@ els.showClipping.addEventListener('change', () => {
   if (state.processed) paintProcessedCanvas(state.processed);
   persist();
 });
+
+// Tile seam overlay is a pure visualisation toggle — it never re-runs the
+// pipeline, just re-renders the existing processed canvas with/without
+// magenta seam lines.
+if (els.showTileSeams) {
+  els.showTileSeams.addEventListener('change', () => {
+    if (state.processed) paintProcessedCanvas(state.processed);
+    persist();
+  });
+}
 
 // Auto-stretch reads the actual brightness range from the most recent
 // processed image (post brightness/contrast/blur, pre-levels) and pins the
@@ -1732,6 +1745,7 @@ function readParamsFromUI() {
 
     asciiSTL: els.asciiSTL.checked,
     showClipping: els.showClipping.checked,
+    showTileSeams: els.showTileSeams ? els.showTileSeams.checked : true,
     cropPolygon: state.cropPolygon.map((p) => ({ x: p.x, y: p.y })),
     layerColors: state.layerColors.slice(0, state.colorCount),
   };
@@ -1796,6 +1810,7 @@ function writeParamsToUI(p) {
   if (p.fitMode) els.fitMode.value = p.fitMode;
   if (p.asciiSTL != null) els.asciiSTL.checked = !!p.asciiSTL;
   if (p.showClipping != null) els.showClipping.checked = !!p.showClipping;
+  if (p.showTileSeams != null && els.showTileSeams) els.showTileSeams.checked = !!p.showTileSeams;
   if (Array.isArray(p.cropPolygon)) {
     state.cropPolygon = p.cropPolygon
       .filter((pt) => pt && Number.isFinite(pt.x) && Number.isFinite(pt.y))
@@ -2054,6 +2069,11 @@ function canvasToImageData(c) {
 // as white and pure-white pixels (above the white point → max relief) are
 // shown as black, so clipped regions jump out visually. Mid-tone pixels
 // pass through unchanged so the grayscale heightmap reads normally.
+//
+// The canvas's pixel aspect ratio equals the unwrapped 3D-surface aspect (it
+// comes from baseW × baseH × density in getTargetDims), so this view IS the
+// 2D unwrap of the target. Tile seams from the Repeat-X/Y sliders are
+// overlaid so it's visible where the source image will repeat on the surface.
 function paintProcessedCanvas(processed) {
   const N = processed.colorCount;
   const colors = state.layerColors.slice(0, N);
@@ -2061,25 +2081,77 @@ function paintProcessedCanvas(processed) {
   const colored = levelMapToColoredImageData(processed.levelMap, N, processed.width, processed.height, colors);
   if (!els.showClipping.checked || N > 1) {
     paintToCanvas(colored, els.processedCanvas);
-    return;
-  }
-  // Clipping highlight for N=1 continuous mode
-  const w = colored.width, h = colored.height;
-  const out = new ImageData(w, h);
-  const src = colored.data;
-  const dst = out.data;
-  for (let i = 0; i < src.length; i += 4) {
-    const r = src[i], g = src[i + 1], b = src[i + 2];
-    if (r === 0 && g === 0 && b === 0) {
-      dst[i] = dst[i + 1] = dst[i + 2] = 255;
-    } else if (r === 255 && g === 255 && b === 255) {
-      dst[i] = dst[i + 1] = dst[i + 2] = 0;
-    } else {
-      dst[i] = r; dst[i + 1] = g; dst[i + 2] = b;
+  } else {
+    // Clipping highlight for N=1 continuous mode
+    const w = colored.width, h = colored.height;
+    const out = new ImageData(w, h);
+    const src = colored.data;
+    const dst = out.data;
+    for (let i = 0; i < src.length; i += 4) {
+      const r = src[i], g = src[i + 1], b = src[i + 2];
+      if (r === 0 && g === 0 && b === 0) {
+        dst[i] = dst[i + 1] = dst[i + 2] = 255;
+      } else if (r === 255 && g === 255 && b === 255) {
+        dst[i] = dst[i + 1] = dst[i + 2] = 0;
+      } else {
+        dst[i] = r; dst[i + 1] = g; dst[i + 2] = b;
+      }
+      dst[i + 3] = src[i + 3];
     }
-    dst[i + 3] = src[i + 3];
+    paintToCanvas(out, els.processedCanvas);
   }
-  paintToCanvas(out, els.processedCanvas);
+  drawTileSeamOverlay(els.processedCanvas);
+}
+
+// Draw dashed magenta lines on the processed canvas where tile boundaries
+// fall. tileX vertical lines at i·W/tileX (i=1..tileX-1), same for tileY
+// horizontally. Reads tile counts from state.lastTileInfo so the same overlay
+// can be redrawn on a clipping-highlight repaint without re-running the
+// pipeline. No-op when the checkbox is off or there's nothing to draw.
+function drawTileSeamOverlay(canvas) {
+  if (!els.showTileSeams || !els.showTileSeams.checked) return;
+  const info = state.lastTileInfo;
+  if (!info) return;
+  const tileX = Math.max(1, info.tileX | 0 || 1);
+  const tileY = Math.max(1, info.tileY | 0 || 1);
+  if (tileX <= 1 && tileY <= 1) return;
+  const W = canvas.width, H = canvas.height;
+  if (!(W > 0) || !(H > 0)) return;
+  const ctx = canvas.getContext('2d');
+  ctx.save();
+  // Pixel-thin line in heightmap pixel space; the CSS-scaled canvas blows it
+  // up to a visible width on screen without bloating the overlay.
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 3]);
+  ctx.strokeStyle = 'rgba(255, 64, 200, 0.95)';
+  ctx.beginPath();
+  for (let i = 1; i < tileX; i++) {
+    const x = Math.round((i * W) / tileX) + 0.5;
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, H);
+  }
+  for (let j = 1; j < tileY; j++) {
+    const y = Math.round((j * H) / tileY) + 0.5;
+    ctx.moveTo(0, y);
+    ctx.lineTo(W, y);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+// Update the "Surface unwrap (X mm × Y mm · NxM tiles)" header label from
+// the cached surface dims + tile counts. Called whenever either changes.
+function updateSurfaceDimsLabel() {
+  const lbl = els.surfaceDimsLabel;
+  if (!lbl) return;
+  const dims = state.lastSurfaceDims;
+  if (!dims) { lbl.textContent = ''; return; }
+  const fmt = (v) => (v >= 100 ? v.toFixed(0) : v.toFixed(1));
+  const tile = state.lastTileInfo || { tileX: 1, tileY: 1 };
+  const tilePart = (tile.tileX > 1 || tile.tileY > 1)
+    ? ` · ${tile.tileX}×${tile.tileY} tiles`
+    : '';
+  lbl.textContent = `${fmt(dims.surfaceW)} × ${fmt(dims.surfaceH)} mm${tilePart}`;
 }
 
 // Render a 256-bin brightness histogram with black/white-point markers
@@ -2431,7 +2503,10 @@ function regeneratePreview() {
     marginPxY
   });
   state.processed = processed;
+  state.lastTileInfo = { tileX: params.tileX | 0 || 1, tileY: params.tileY | 0 || 1 };
+  state.lastSurfaceDims = { surfaceW: baseW, surfaceH: baseH };
   paintProcessedCanvas(processed);
+  updateSurfaceDimsLabel();
   paintHistogram(processed, params);
 
   const heightmapMm = buildHeightmap(processed, {
@@ -2448,7 +2523,6 @@ function regeneratePreview() {
   }
   state.heightmapMm = heightmapMm;
   state.lastHeightmap = { data: heightmapMm, width: processed.width, height: processed.height };
-  state.lastSurfaceDims = { surfaceW: baseW, surfaceH: baseH };
   state.lastCustomDims = customDims;
   state.lastParamsForMesh = params;
   return true;

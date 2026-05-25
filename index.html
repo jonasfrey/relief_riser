@@ -140,10 +140,17 @@
 
         <div class="panel preview-sticky">
           <div class="preview-large">
-            <h3>Processed (heightmap)</h3>
+            <h3>
+              Surface unwrap (heightmap on target)
+              <span id="surfaceDimsLabel" class="dim-label"></span>
+            </h3>
+            <p class="hint" id="surfaceUnwrapHint">Drawn at the true aspect ratio of the unwrapped 3D target surface, so the greyscale on this canvas is exactly what gets pushed into the relief — no guessing how stretch/tile/fit will land.</p>
             <canvas id="processedCanvas" class="img-preview img-preview-large"></canvas>
             <div class="control inline">
               <label><input type="checkbox" id="showClipping" /> Highlight clipping (under→white, over→black)</label>
+            </div>
+            <div class="control inline">
+              <label><input type="checkbox" id="showTileSeams" checked /> Show tile seams (magenta) on unwrap</label>
             </div>
             <canvas id="histogramCanvas" class="histogram"></canvas>
           </div>

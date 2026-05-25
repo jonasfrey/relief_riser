@@ -232,6 +232,13 @@ details.panel:not([open]) > summary::before {
   max-height: 60vh;
 }
 
+.dim-label {
+  margin-left: 0.5rem;
+  font-weight: 400;
+  font-size: 0.78rem;
+  color: var(--text-dim);
+}
+
 .source-canvas {
   cursor: crosshair;
 }
