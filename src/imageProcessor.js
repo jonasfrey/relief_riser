@@ -1,3 +1,4 @@
+// license Jonas Immanuel Frey GPL
 // Image processing utilities for the relief pipeline.
 //
 // processImage() does grayscale + brightness/contrast/blur/invert, then
@@ -117,17 +118,20 @@ export function rasterize(sourceCanvas, targetW, targetH, fitMode, opts = {}) {
 
   if (perTileFit) {
     // Per-tile fit: each of tileX × tileY tiles owns its own box of size
-    // (innerW/tileX) × (innerH/tileY). The source image is fit into that
-    // box (preserving its aspect) or stretched to it. Used for closed
-    // revolved surfaces where tileX must literally wrap N times around.
+    // (innerW/tileX) × (innerH/tileY). 'fit' uses COVER semantics — fill the
+    // box and let the longer axis overflow into the neighbour (clipped to
+    // box bounds). Lets stretchX past the auto-fit value shift the seam
+    // location for tileable sources instead of collapsing the image
+    // vertically once srcAspect crosses boxAspect. 'stretch' forces the
+    // image to exact box dimensions, ignoring aspect.
     const boxW = innerW / tileX;
     const boxH = innerH / tileY;
     const srcAspect = sourceCanvas.width / sourceCanvas.height;
     let drawW, drawH;
     if (fitMode === 'fit') {
       const boxAspect = boxW / boxH;
-      if (srcAspect > boxAspect) { drawW = boxW; drawH = boxW / srcAspect; }
-      else                       { drawH = boxH; drawW = boxH * srcAspect; }
+      if (srcAspect > boxAspect) { drawH = boxH; drawW = boxH * srcAspect; }
+      else                       { drawW = boxW; drawH = boxW / srcAspect; }
     } else {
       drawW = boxW; drawH = boxH;
     }
@@ -135,12 +139,14 @@ export function rasterize(sourceCanvas, targetW, targetH, fitMode, opts = {}) {
     const insetY = (boxH - drawH) / 2;
     for (let j = 0; j < tileY; j++) {
       for (let i = 0; i < tileX; i++) {
-        ctx.drawImage(
-          sourceCanvas,
-          marginPxX + i * boxW + insetX,
-          marginPxY + j * boxH + insetY,
-          drawW, drawH
-        );
+        const bx = marginPxX + i * boxW;
+        const by = marginPxY + j * boxH;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(bx, by, boxW, boxH);
+        ctx.clip();
+        ctx.drawImage(sourceCanvas, bx + insetX, by + insetY, drawW, drawH);
+        ctx.restore();
       }
     }
     return canvas;
