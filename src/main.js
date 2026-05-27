@@ -1168,7 +1168,7 @@ function updateShapeLabels() {
   } else if (isPoly) {
     els.plateWLabel.textContent = 'Side width W (mm)';
   } else if (isPolyProfile) {
-    els.plateWLabel.textContent = 'Side width W (mm)';
+    els.plateWLabel.textContent = 'Radius R (mm)';
   } else {
     els.plateWLabel.textContent = 'Width W (mm)';
   }
@@ -1589,13 +1589,14 @@ function computeDerivedDims() {
 
   if (state.shape === 'polyProfile') {
     const sides = parseInt(els.sides.value, 10) || 4;
-    const sideWidth = uiW;
+    const radius = uiW;
+    const sideWidth = 2 * radius * Math.sin(Math.PI / sides);
     const perimeter = sides * sideWidth;
     const actualPlateW = perimeter / tileX;
     const dims = polyProfileDims({ radiusFactor: parseFloat(els.radiusFactor.value) || 1, heightFactor: parseFloat(els.heightFactor.value) || 1, outerBandFrac: parseFloat(els.outerBandFrac.value) || 50 });
     const bandLength = dims ? dims.bandLength : 10;
     const plateH = bandLength;
-    return { actualPlateW, plateH, perimeter, sides, sideWidth, bandLength, tileX, tileY };
+    return { actualPlateW, plateH, perimeter, sides, radius, sideWidth, bandLength, tileX, tileY };
   }
 
   const actualPlateW = uiW;
@@ -1649,10 +1650,10 @@ function applyDerivedDims() {
         derivedTileY = Math.max(1, Math.min(60, Math.round(ideal) || 1));
       }
       els.derivedDimsHint.textContent =
-        `→ perimeter ${pd.perimeter.toFixed(1)} mm · band ${pd.bandLength.toFixed(1)} mm · auto Repeat Y = ${derivedTileY}`;
+        `→ radius ${pd.radius.toFixed(1)} mm · perimeter ${pd.perimeter.toFixed(1)} mm · band ${pd.bandLength.toFixed(1)} mm · auto Repeat Y = ${derivedTileY}`;
     } else if (pd) {
       els.derivedDimsHint.textContent =
-        `→ perimeter ${pd.perimeter.toFixed(1)} mm · band ${pd.bandLength.toFixed(1)} mm`;
+        `→ radius ${pd.radius.toFixed(1)} mm · perimeter ${pd.perimeter.toFixed(1)} mm · band ${pd.bandLength.toFixed(1)} mm`;
     } else {
       els.derivedDimsHint.textContent = '';
     }
@@ -2402,10 +2403,12 @@ function polyProfileDims(params) {
   const base = customProfileDims(params);
   if (!base) return null;
   const sides = parseInt(els.sides.value, 10) || 4;
-  const sideWidth = parseFloat(els.plateW.value);
-  if (!(sideWidth > 0)) return null;
+  const radius = parseFloat(els.plateW.value);
+  if (!(radius > 0)) return null;
+  const apothem = radius * Math.cos(Math.PI / sides);
+  const sideWidth = 2 * radius * Math.sin(Math.PI / sides);
   const perimeter = sides * sideWidth;
-  return { ...base, perimeter, sides, sideWidth };
+  return { ...base, perimeter, sides, radius, apothem, sideWidth };
 }
 
 function estimateTrisForShape(targetW, targetH, shape, sides, hasChamfer, profileLen) {
@@ -2734,7 +2737,7 @@ function regenerateMesh() {
       });
     } else if (params.shape === 'polyProfile') {
       if (!customDims) return;
-      const { scaled, band, sides, sideWidth } = customDims;
+      const { scaled, band, sides, radius } = customDims;
       const Ny = heightmap.height;
       const resampled = resampleSlice(scaled, band.startIdx, band.length, Ny);
       const profilePts = spliceSlice(scaled, band.startIdx, band.length, resampled);
@@ -2743,7 +2746,7 @@ function regenerateMesh() {
         outerStart: 0,
         outerLength: Ny,
         sides,
-        sideWidth
+        radius
       });
     } else {
       geom = buildReliefGeometry(heightmap, {

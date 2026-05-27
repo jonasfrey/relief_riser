@@ -1558,14 +1558,14 @@ export function buildRectProfileGeometry(heightmap, opts) {
 // by step = bbox(axis) + offsetMm, and the whole assembly is recentered so
 // the original center on that axis is preserved. vertexColors are
 export function estimatePolyProfileTriangleCount(Nface, Np) {
-  // Toroidal grid Nface × Np, both directions wrap closed → 2·Nface·Np triangles.
+  // Outer surface: 2·Nface·(Ny−1) + Inner surface: 2·Nface·(Ni−1)
+  // + top/bottom caps: 4·Nface. Total = 2·Nface·(Ny+Ni) = 2·Nface·Np.
   return 2 * Nface * Np;
 }
 
-// Sweep a closed 2D profile along a regular-polygon path. Each edge of the
-// N-gon carries the full profile cross-section; the "outer band" of the
-// profile (already resampled to exactly Ny = heightmap.height points) is
-// offset outward by the relief.
+// Sweep a closed 2D profile along a regular-polygon path using cylinder-like
+// topology (angular direction wraps closed; profile direction is split into
+// outer and inner bands with caps, like PolygonPrismGeometry).
 //
 // Coordinate convention
 //   - Profile X = distance outward from the polygon face (face sits at r=0).
@@ -1575,14 +1575,16 @@ export function estimatePolyProfileTriangleCount(Nface, Np) {
 //
 // Inputs
 //   heightmap:       { data: Float32Array(Nx*Ny), width: Nx, height: Ny }
+//   opts.radius:      polygon circumradius R (mm) — distance from center to vertices
 //   opts.sides:       number of polygon sides (N)
-//   opts.sideWidth:   outer side length W (mm)
-//   opts.profile:     Array of [r, z] pairs, closed loop, no duplicate end
-//   opts.outerStart:  index of first outer-band point
-//   opts.outerLength: number of consecutive outer-band points (must equal Ny)
+//   opts.profile:     Array of [r, z] pairs, closed loop, no duplicate end.
+//                     After splicing, indices 0..Ny−1 = outer band (resampled),
+//                     indices Ny..Np−1 = inner band.
+//   opts.outerStart:  index of first outer-band point (always 0 after splice)
+//   opts.outerLength: number of outer-band points (must equal Ny)
 //
-// Topology: torus — both the angular ring (Nface = N·(Nx−1)) and the profile
-// loop (Np = profile.length) wrap closed.
+// Topology: cylinder-like — outer surface (Nface × Ny) + inner surface
+// (Nface × Ni) + top/bottom annular caps, where Nface = N·(Nx−1).
 export function buildPolyProfileGeometry(heightmap, opts) {
   const Nx = heightmap.width;
   const Ny = heightmap.height;
@@ -1595,17 +1597,20 @@ export function buildPolyProfileGeometry(heightmap, opts) {
   }
   const Np = profile.length;
   const N = Math.max(3, Math.min(64, opts.sides | 0));
-  const W = opts.sideWidth;
+  const R = opts.radius;                // circumradius
+  if (!(R > 0)) throw new Error('PolyProfile: radius must be > 0');
 
   const outerStart  = opts.outerStart | 0;
   const outerLength = opts.outerLength | 0;
   if (outerLength !== Ny) {
     throw new Error(`PolyProfile: outer band length (${outerLength}) must equal Ny (${Ny})`);
   }
+  const NyInner = Np - Ny;              // inner-band point count
 
-  const tanHalfAngle = Math.tan(Math.PI / N);
-  const apothem = W / (2 * tanHalfAngle);
-  const Nface = N * (Nx - 1);   // angular vertices around polygon (corners shared)
+  // Polygon geometry from circumradius R
+  const apothem = R * Math.cos(Math.PI / N);
+  const sideWidth = 2 * R * Math.sin(Math.PI / N);
+  const Nface = N * (Nx - 1);           // angular vertices around polygon (corners shared)
 
   // Mark outer-band profile indices and their image row 0..Ny−1.
   const bandStartZ = profile[outerStart][1];
@@ -1630,7 +1635,7 @@ export function buildPolyProfileGeometry(heightmap, opts) {
     }
   }
   if (minR < -apothem + AXIS_TOL) {
-    throw new Error('PolyProfile: profile extends inward past the polygon center. Increase side width or reduce profile depth.');
+    throw new Error('PolyProfile: profile extends inward past the polygon center. Increase radius or reduce profile depth.');
   }
 
   // Map ring index → heightmap column (Nx columns wrap full perimeter)
@@ -1648,63 +1653,108 @@ export function buildPolyProfileGeometry(heightmap, opts) {
     sinT[k] = Math.sin(t);
   }
 
-  const totalVerts = Nface * Np;
+  // Helper: compute world XY for a given (ring, r, s) — ring determines the
+  // face and position along it; r = distance from face; s = param along face.
+  const facePos = (ring, r) => {
+    const k = Math.floor(ring / (Nx - 1));
+    const seg = ring - k * (Nx - 1);
+    const s = (seg / (Nx - 1)) * sideWidth - sideWidth / 2;
+    const cT = cosT[k], sT = sinT[k];
+    return {
+      x: (apothem + r) * cT - s * sT,
+      y: (apothem + r) * sT + s * cT
+    };
+  };
+
+  const outerCount = Nface * Ny;
+  const innerCount = Nface * NyInner;
+  const totalVerts = outerCount + innerCount;
   const positions = new Float32Array(totalVerts * 3);
 
-  for (let i = 0; i < Np; i++) {
+  // --- Outer surface vertices (Nface × Ny) ---
+  for (let j = 0; j < Ny; j++) {
+    const i = outerStart + j;   // profile index for outer-band row j
     const r0 = profile[i][0];
     const z  = profile[i][1];
-    const row = outerRow[i];
-    const isOuter = row >= 0;
     for (let ring = 0; ring < Nface; ring++) {
-      const k = Math.floor(ring / (Nx - 1));
-      const seg = ring - k * (Nx - 1);
-      const s = (seg / (Nx - 1)) * W - W / 2;
-
-      let r = r0;
-      if (isOuter) {
-        const col = ringToCol(ring);
-        r += heightmap.data[col + row * Nx];
-      }
-
-      const cT = cosT[k], sT = sinT[k];
-      const x = (apothem + r) * cT - s * sT;
-      const y = (apothem + r) * sT + s * cT;
-
-      const vi = (ring * Np + i) * 3;
+      const col = ringToCol(ring);
+      const relief = heightmap.data[col + j * Nx];
+      const r = r0 + relief;
+      const { x, y } = facePos(ring, r);
+      const vi = (ring + j * Nface) * 3;
       positions[vi]     = x;
       positions[vi + 1] = y;
       positions[vi + 2] = z;
     }
   }
 
-  // Determine winding direction so triangles face outward from the solid.
-  let signedArea = 0;
-  for (let i = 0; i < Np; i++) {
-    const a = profile[i], b = profile[(i + 1) % Np];
-    signedArea += (b[0] - a[0]) * (b[1] + a[1]) * 0.5;
+  // --- Inner surface vertices (Nface × NyInner) ---
+  // Inner band goes from bottom (after outer band) back to top, completing the
+  // closed profile loop. inner row 0 = bottom (meets outer row Ny−1),
+  // inner row NyInner−1 = top (meets outer row 0).
+  for (let j = 0; j < NyInner; j++) {
+    const i = (outerStart + outerLength + j) % Np;
+    const r0 = profile[i][0];
+    const z  = profile[i][1];
+    for (let ring = 0; ring < Nface; ring++) {
+      const { x, y } = facePos(ring, r0);
+      const vi = (outerCount + ring + j * Nface) * 3;
+      positions[vi]     = x;
+      positions[vi + 1] = y;
+      positions[vi + 2] = z;
+    }
   }
-  const flip = signedArea < 0;
 
+  // --- Indices ---
   const triCount = estimatePolyProfileTriangleCount(Nface, Np);
   const indices = new Uint32Array(triCount * 3);
   let p = 0;
 
-  const idx = (ring, i) => ((ring % Nface + Nface) % Nface) * Np + ((i % Np + Np) % Np);
-  for (let ring = 0; ring < Nface; ring++) {
-    for (let i = 0; i < Np; i++) {
-      const a = idx(ring,     i);
-      const b = idx(ring + 1, i);
-      const c = idx(ring + 1, i + 1);
-      const d = idx(ring,     i + 1);
-      if (flip) {
-        indices[p++] = a; indices[p++] = b; indices[p++] = c;
-        indices[p++] = a; indices[p++] = c; indices[p++] = d;
-      } else {
-        indices[p++] = a; indices[p++] = c; indices[p++] = b;
-        indices[p++] = a; indices[p++] = d; indices[p++] = c;
-      }
+  const outer = (ring, row) => ((ring % Nface + Nface) % Nface) + row * Nface;
+  const inner = (ring, row) => outerCount + ((ring % Nface + Nface) % Nface) + row * Nface;
+
+  // Outer surface (outward normal)
+  for (let j = 0; j < Ny - 1; j++) {
+    for (let ring = 0; ring < Nface; ring++) {
+      const a = outer(ring,     j);
+      const b = outer(ring + 1, j);
+      const c = outer(ring + 1, j + 1);
+      const d = outer(ring,     j + 1);
+      indices[p++] = a; indices[p++] = d; indices[p++] = c;
+      indices[p++] = a; indices[p++] = c; indices[p++] = b;
     }
+  }
+
+  // Inner surface (inward normal — toward polygon center)
+  for (let j = 0; j < NyInner - 1; j++) {
+    for (let ring = 0; ring < Nface; ring++) {
+      const a = inner(ring,     j);
+      const b = inner(ring + 1, j);
+      const c = inner(ring + 1, j + 1);
+      const d = inner(ring,     j + 1);
+      indices[p++] = a; indices[p++] = c; indices[p++] = d;
+      indices[p++] = a; indices[p++] = b; indices[p++] = c;
+    }
+  }
+
+  // Top cap: outer row 0 ↔ inner row NyInner−1 (both at profile top / max Z)
+  for (let ring = 0; ring < Nface; ring++) {
+    const o0 = outer(ring,     0);
+    const o1 = outer(ring + 1, 0);
+    const i0 = inner(ring,     NyInner - 1);
+    const i1 = inner(ring + 1, NyInner - 1);
+    indices[p++] = o0; indices[p++] = o1; indices[p++] = i1;
+    indices[p++] = o0; indices[p++] = i1; indices[p++] = i0;
+  }
+
+  // Bottom cap: outer row Ny−1 ↔ inner row 0 (both at profile bottom / min Z)
+  for (let ring = 0; ring < Nface; ring++) {
+    const o0 = outer(ring,     Ny - 1);
+    const o1 = outer(ring + 1, Ny - 1);
+    const i0 = inner(ring,     0);
+    const i1 = inner(ring + 1, 0);
+    indices[p++] = o0; indices[p++] = i1; indices[p++] = o1;
+    indices[p++] = o0; indices[p++] = i0; indices[p++] = i1;
   }
 
   return {
@@ -1716,6 +1766,7 @@ export function buildPolyProfileGeometry(heightmap, opts) {
     Ny,
     Np,
     Nface,
+    outerCount,
     outerStart,
     outerLength
   };
