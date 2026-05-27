@@ -1666,21 +1666,45 @@ export function buildPolyProfileGeometry(heightmap, opts) {
     };
   };
 
+  // Polygon corner position at offset r (perpendicular to both adjacent faces).
+  // The offset-by-r polygon's corner is the intersection of face (k−1)'s and
+  // face k's lines pushed outward by r; that intersection lies along the
+  // outward bisector at distance (apothem + r)/cos(π/N) from center.
+  // Without this, placing the corner in just one face's frame puts it at
+  // (apothem + r) along that face's normal — which is "inside" the true
+  // offset corner and creates a visible chamfer strip at every corner
+  // (the bug that turned an N=4 prism into an octagon).
+  const cosHalfAngle = Math.cos(Math.PI / N);
+  const cornerPos = (kc, r) => {
+    const a = (kc * 2 * Math.PI) / N - Math.PI / N;
+    const dist = (apothem + r) / cosHalfAngle;
+    return { x: dist * Math.cos(a), y: dist * Math.sin(a) };
+  };
+
   const outerCount = Nface * Ny;
   const innerCount = Nface * NyInner;
   const totalVerts = outerCount + innerCount;
   const positions = new Float32Array(totalVerts * 3);
 
   // --- Outer surface vertices (Nface × Ny) ---
+  // At polygon-corner rings (ring % (Nx-1) === 0) place the vertex on the
+  // outward bisector at the offset corner of the (apothem + r0)-polygon, with
+  // relief forced to 0 — matches PolygonPrism's "col 0 → flat corner" rule
+  // and keeps the corner sharp regardless of r0 or relief.
   for (let j = 0; j < Ny; j++) {
     const i = outerStart + j;   // profile index for outer-band row j
     const r0 = profile[i][0];
     const z  = profile[i][1];
     for (let ring = 0; ring < Nface; ring++) {
-      const col = ringToCol(ring);
-      const relief = heightmap.data[col + j * Nx];
-      const r = r0 + relief;
-      const { x, y } = facePos(ring, r);
+      let x, y;
+      if (ring % (Nx - 1) === 0) {
+        const kc = ring / (Nx - 1);
+        ({ x, y } = cornerPos(kc, r0));
+      } else {
+        const col = ringToCol(ring);
+        const relief = heightmap.data[col + j * Nx];
+        ({ x, y } = facePos(ring, r0 + relief));
+      }
       const vi = (ring + j * Nface) * 3;
       positions[vi]     = x;
       positions[vi + 1] = y;
@@ -1691,13 +1715,21 @@ export function buildPolyProfileGeometry(heightmap, opts) {
   // --- Inner surface vertices (Nface × NyInner) ---
   // Inner band goes from bottom (after outer band) back to top, completing the
   // closed profile loop. inner row 0 = bottom (meets outer row Ny−1),
-  // inner row NyInner−1 = top (meets outer row 0).
+  // inner row NyInner−1 = top (meets outer row 0). Corner rings use the
+  // bisector formula so the inner surface follows the same offset polygon as
+  // the outer at every row.
   for (let j = 0; j < NyInner; j++) {
     const i = (outerStart + outerLength + j) % Np;
     const r0 = profile[i][0];
     const z  = profile[i][1];
     for (let ring = 0; ring < Nface; ring++) {
-      const { x, y } = facePos(ring, r0);
+      let x, y;
+      if (ring % (Nx - 1) === 0) {
+        const kc = ring / (Nx - 1);
+        ({ x, y } = cornerPos(kc, r0));
+      } else {
+        ({ x, y } = facePos(ring, r0));
+      }
       const vi = (outerCount + ring + j * Nface) * 3;
       positions[vi]     = x;
       positions[vi + 1] = y;
