@@ -22,6 +22,7 @@ import {
   buildRectProfileGeometry,
   buildPolygonPrismGeometry,
   buildCustomProfileGeometry,
+  buildPolyProfileGeometry,
   buildSTLWrapGeometry,
   replicateGeometry,
   estimateTriangleCount,
@@ -30,6 +31,7 @@ import {
   estimateRectProfileTriangleCount,
   estimatePolygonPrismTriangleCount,
   estimateCustomProfileTriangleCount,
+  estimatePolyProfileTriangleCount,
   estimateSTLWrapTriangleCount
 } from './geometry.js';
 import {
@@ -114,6 +116,7 @@ const els = {
   chamferTop: $('chamferTop'),       chamferTopNum: $('chamferTopNum'),
   chamferTopControl: $('chamferTopControl'),
   customProfileControls: $('customProfileControls'),
+  customProfileHint: $('customProfileHint'),
   ellipseControls: $('ellipseControls'),
   ellipseX:          $('ellipseX'),         ellipseXNum:          $('ellipseXNum'),
   ellipseY:          $('ellipseY'),         ellipseYNum:          $('ellipseYNum'),
@@ -350,6 +353,9 @@ els.shape.addEventListener('change', () => {
   viewer.requestFrame();
   if (state.shape === 'customProfile' && !state.profilePoints) {
     loadDefaultProfile();   // fire-and-forget; pipeline re-runs when it lands
+  }
+  if (state.shape === 'polyProfile' && !state.profilePoints) {
+    loadDefaultProfile();
   }
   if (state.shape === 'stlWrap' && !state.wrapStl) {
     loadDefaultWrapStl();   // fire-and-forget; pipeline re-runs when it lands
@@ -1151,6 +1157,7 @@ function updateThresholdVisibility() {
 
 function updateShapeLabels() {
   const isPoly = state.shape === 'polygon';
+  const isPolyProfile = state.shape === 'polyProfile';
   const isCyl  = state.shape === 'cylindrical';
   const isCustom = state.shape === 'customProfile';
   const isStlWrap = state.shape === 'stlWrap';
@@ -1160,27 +1167,43 @@ function updateShapeLabels() {
     els.plateWLabel.textContent = 'Radius R (mm)';
   } else if (isPoly) {
     els.plateWLabel.textContent = 'Side width W (mm)';
+  } else if (isPolyProfile) {
+    els.plateWLabel.textContent = 'Side width W (mm)';
   } else {
     els.plateWLabel.textContent = 'Width W (mm)';
   }
-  els.sidesControl.classList.toggle('hidden', !isPoly);
+  els.sidesControl.classList.toggle('hidden', !(isPoly || isPolyProfile));
   els.closedBottomControl.classList.toggle('hidden', !(isPoly || isCyl || isStlWrap));
   els.chamferTopControl.classList.toggle('hidden', !isPoly);
-  els.customProfileControls.classList.toggle('hidden', !isCustom);
+  els.customProfileControls.classList.toggle('hidden', !(isCustom || isPolyProfile));
   if (els.stlWrapControls) els.stlWrapControls.classList.toggle('hidden', !isStlWrap);
   if (els.ellipseControls) els.ellipseControls.classList.toggle('hidden', !isEllipse);
   if (els.rectProfileControls) els.rectProfileControls.classList.toggle('hidden', !isRectProfile);
-  // Custom-profile, STL-wrap, ellipse, and rectProfile modes all own their own
-  // dimensional controls, so the plain plate W slider is irrelevant. The H
-  // control is permanently hidden — H is always derived. baseThickness is
-  // hidden for custom profile (not used), ellipse, and rectProfile (each has
-  // its own thickness slider); STL wrap and cylindrical still use it.
+  // Update profile hint text based on shape
+  if (els.customProfileHint) {
+    if (isPolyProfile) {
+      els.customProfileHint.textContent = 'DXF profile is swept along each edge of a regular polygon. Profile X = distance outward from the polygon face; Profile Y = Z (height). The outer band gets the relief offset. The image wraps once around the full polygon perimeter.';
+    } else {
+      els.customProfileHint.textContent = 'DXF should be a single closed loop of LINE / ARC / CIRCLE / ELLIPSE / LWPOLYLINE entities. Profile X = radial distance from rotation (Z) axis; Profile Y = axial coord. The "outer band" (right-facing arc whose X is within this fraction of max X) gets the relief offset. With Auto Repeat Y on, swapping profiles only changes how many rows fit; one tile stays the same physical size.';
+    }
+  }
+  // Update radius factor label
+  const rfLabel = document.querySelector('label[for="radiusFactor"]');
+  if (rfLabel) {
+    rfLabel.textContent = isPolyProfile ? 'Thickness factor (× DXF X)' : 'Radius factor (× DXF X)';
+  }
+  // Custom-profile, polyProfile, STL-wrap, ellipse, and rectProfile modes all
+  // own their own dimensional controls, so the plain plate W slider is
+  // irrelevant. The H control is permanently hidden — H is always derived.
+  // baseThickness is hidden for custom profile (not used), ellipse, and
+  // rectProfile (each has its own thickness slider); STL wrap and cylindrical
+  // still use it. polyProfile also hides baseThickness (profile defines it).
   const plateCtl = els.plateW.closest('.control');
   const plateHCtl = els.plateH.closest('.control');
   const baseCtl = els.baseThickness.closest('.control');
   if (plateCtl)  plateCtl.classList.toggle('hidden', isCustom || isStlWrap || isEllipse || isRectProfile);
   if (plateHCtl) plateHCtl.classList.add('hidden');
-  if (baseCtl)   baseCtl.classList.toggle('hidden', isCustom || isEllipse || isRectProfile);
+  if (baseCtl)   baseCtl.classList.toggle('hidden', isCustom || isEllipse || isRectProfile || isPolyProfile);
   if (els.derivedDimsHint) els.derivedDimsHint.classList.toggle('hidden', isCustom || isStlWrap || isEllipse || isRectProfile);
 }
 
@@ -1564,6 +1587,17 @@ function computeDerivedDims() {
     };
   }
 
+  if (state.shape === 'polyProfile') {
+    const sides = parseInt(els.sides.value, 10) || 4;
+    const sideWidth = uiW;
+    const perimeter = sides * sideWidth;
+    const actualPlateW = perimeter / tileX;
+    const dims = polyProfileDims({ radiusFactor: parseFloat(els.radiusFactor.value) || 1, heightFactor: parseFloat(els.heightFactor.value) || 1, outerBandFrac: parseFloat(els.outerBandFrac.value) || 50 });
+    const bandLength = dims ? dims.bandLength : 10;
+    const plateH = bandLength;
+    return { actualPlateW, plateH, perimeter, sides, sideWidth, bandLength, tileX, tileY };
+  }
+
   const actualPlateW = uiW;
   const plateH = actualPlateW * (imgH / imgW) * (tileY / tileX);
   return { actualPlateW, plateH, tileX, tileY };
@@ -1598,9 +1632,34 @@ function applyDerivedDims() {
       els.derivedDimsHint.textContent = '';
     }
   }
+  if (state.shape === 'polyProfile' && els.derivedDimsHint) {
+    const pd = polyProfileDims({
+      radiusFactor: parseFloat(els.radiusFactor.value) || 1,
+      heightFactor: parseFloat(els.heightFactor.value) || 1,
+      outerBandFrac: parseFloat(els.outerBandFrac.value) || 50
+    });
+    if (pd && els.customAutoTileY && els.customAutoTileY.checked && state.sourceCanvas) {
+      const crop = currentCropRect();
+      const imgW = state.sourceCanvas.width * crop.fX;
+      const imgH = state.sourceCanvas.height * crop.fY;
+      const tileX = parseInt(els.tileX.value, 10) || 1;
+      let derivedTileY = '?';
+      if (imgW > 0 && imgH > 0 && pd.perimeter > 0) {
+        const ideal = (tileX * pd.bandLength * imgH) / (pd.perimeter * imgW);
+        derivedTileY = Math.max(1, Math.min(60, Math.round(ideal) || 1));
+      }
+      els.derivedDimsHint.textContent =
+        `→ perimeter ${pd.perimeter.toFixed(1)} mm · band ${pd.bandLength.toFixed(1)} mm · auto Repeat Y = ${derivedTileY}`;
+    } else if (pd) {
+      els.derivedDimsHint.textContent =
+        `→ perimeter ${pd.perimeter.toFixed(1)} mm · band ${pd.bandLength.toFixed(1)} mm`;
+    } else {
+      els.derivedDimsHint.textContent = '';
+    }
+  }
   const dims = computeDerivedDims();
   if (!dims) {
-    if (state.shape !== 'customProfile' && els.derivedDimsHint) els.derivedDimsHint.textContent = '';
+    if (state.shape !== 'customProfile' && state.shape !== 'polyProfile' && els.derivedDimsHint) els.derivedDimsHint.textContent = '';
     return;
   }
   // Write raw (unrounded) so the tile aspect is preserved exactly. The H
@@ -1622,6 +1681,8 @@ function applyDerivedDims() {
   } else if (state.shape === 'ellipse') {
     // The ellipse panel already shows X/Y/height literally, so the regular
     // derived-dims hint is hidden in this mode (see updateShapeLabels).
+  } else if (state.shape === 'polyProfile') {
+    // Hint was already set in the polyProfile block above.
   } else {
     els.derivedDimsHint.textContent = `→ height ${fmt(dims.plateH)} mm`;
   }
@@ -1644,24 +1705,28 @@ function readParamsFromUI() {
   const effectiveTileX = (state.shape === 'stlWrap' && derived && derived.autoTileX != null)
     ? derived.autoTileX
     : uiTileX;
-  // Custom-profile auto Y: lock the axial tile size to the circumferential
-  // tile size so the same image, when applied to profiles that differ only
-  // in height, keeps each tile the same physical mm. Just changes how many
-  // rows fit. tileY = round(tileX × bandLength × imgH / (circumference × imgW)).
+  // Custom-profile / polyProfile auto Y: lock the axial tile size to the
+  // circumferential/perimeter tile size so the same image, when applied to
+  // profiles that differ only in height, keeps each tile the same physical mm.
+  // Just changes how many rows fit.
+  // tileY = round(tileX × bandLength × imgH / (circumference × imgW)).
   const uiTileY = parseInt(els.tileY.value, 10) || 1;
   let effectiveTileY = uiTileY;
-  if (state.shape === 'customProfile' && els.customAutoTileY && els.customAutoTileY.checked && state.sourceCanvas) {
+  if ((state.shape === 'customProfile' || state.shape === 'polyProfile') && els.customAutoTileY && els.customAutoTileY.checked && state.sourceCanvas) {
     const cd = customProfileDims({
       radiusFactor: parseFloat(els.radiusFactor.value) || 1,
       heightFactor: parseFloat(els.heightFactor.value) || 1,
       outerBandFrac: parseFloat(els.outerBandFrac.value) || 50
     });
-    if (cd && cd.circumference > 0) {
+    const wrapLen = state.shape === 'polyProfile'
+      ? (parseInt(els.sides.value, 10) || 4) * parseFloat(els.plateW.value)
+      : (cd ? cd.circumference : 0);
+    if (cd && wrapLen > 0) {
       const crop = currentCropRect();
       const imgW = state.sourceCanvas.width * crop.fX;
       const imgH = state.sourceCanvas.height * crop.fY;
       if (imgW > 0 && imgH > 0) {
-        const ideal = (uiTileX * cd.bandLength * imgH) / (cd.circumference * imgW);
+        const ideal = (uiTileX * cd.bandLength * imgH) / (wrapLen * imgW);
         effectiveTileY = Math.max(1, Math.min(60, Math.round(ideal) || 1));
       }
     }
@@ -1842,7 +1907,7 @@ function writeParamsToUI(p) {
     state.heightSmooth = !!p.heightSmooth;
     if (els.heightSmooth) els.heightSmooth.checked = state.heightSmooth;
   }
-  if (p.shape === 'rectangular' || p.shape === 'cylindrical' || p.shape === 'polygon' || p.shape === 'customProfile' || p.shape === 'stlWrap' || p.shape === 'ellipse' || p.shape === 'rectProfile') {
+  if (p.shape === 'rectangular' || p.shape === 'cylindrical' || p.shape === 'polygon' || p.shape === 'customProfile' || p.shape === 'polyProfile' || p.shape === 'stlWrap' || p.shape === 'ellipse' || p.shape === 'rectProfile') {
     state.shape = p.shape;
     els.shape.value = p.shape;
   }
@@ -2280,6 +2345,13 @@ function getTargetDims(params) {
     // aspect (circumference/tileX) / bandLength.
     w = dims.circumference;
     h = dims.bandLength;
+  } else if (params.shape === 'polyProfile') {
+    const dims = polyProfileDims(params);
+    if (!dims) return { targetW: 2, targetH: 2 };
+    // Image wraps once around full polygon perimeter. Like customProfile,
+    // baseW = perimeter (NOT × tileX); rasterizer uses perTileFit path.
+    w = dims.perimeter;
+    h = dims.bandLength;
   } else if (params.shape === 'cylindrical' || params.shape === 'stlWrap' || params.shape === 'ellipse' || params.shape === 'rectProfile') {
     w = params.plateW * params.tileX;
     h = params.plateH;
@@ -2326,6 +2398,16 @@ function customProfileDims(params) {
   return { circumference, bandLength, scaled, band, maxR: bandMaxX };
 }
 
+function polyProfileDims(params) {
+  const base = customProfileDims(params);
+  if (!base) return null;
+  const sides = parseInt(els.sides.value, 10) || 4;
+  const sideWidth = parseFloat(els.plateW.value);
+  if (!(sideWidth > 0)) return null;
+  const perimeter = sides * sideWidth;
+  return { ...base, perimeter, sides, sideWidth };
+}
+
 function estimateTrisForShape(targetW, targetH, shape, sides, hasChamfer, profileLen) {
   if (shape === 'cylindrical') return estimateCylindricalTriangleCount(targetW, targetH);
   if (shape === 'stlWrap') return estimateSTLWrapTriangleCount(targetW, targetH);
@@ -2340,6 +2422,11 @@ function estimateTrisForShape(targetW, targetH, shape, sides, hasChamfer, profil
     // grows linearly with Ny.
     const np = (profileLen || 32) + targetH;
     return estimateCustomProfileTriangleCount(targetW, np);
+  }
+  if (shape === 'polyProfile') {
+    const np = (profileLen || 32) + targetH;
+    const Nface = sides * (targetW - 1);
+    return estimatePolyProfileTriangleCount(Nface, np);
   }
   return estimateTriangleCount(targetW, targetH);
 }
@@ -2415,6 +2502,16 @@ function regeneratePreview() {
     // rasterizer stamps tileX copies inside that single-rev canvas.
     baseW = customDims.circumference;
     baseH = customDims.bandLength;
+  } else if (params.shape === 'polyProfile') {
+    const ppDims = polyProfileDims(params);
+    if (!ppDims) {
+      showWarning('Load a DXF profile first.', false);
+      setExportEnabled(false);
+      return false;
+    }
+    baseW = ppDims.perimeter;
+    baseH = ppDims.bandLength;
+    customDims = ppDims;
   } else if (params.shape === 'cylindrical' || params.shape === 'ellipse' || params.shape === 'rectProfile') {
     baseW = params.plateW * params.tileX;
     baseH = params.plateH;
@@ -2478,7 +2575,7 @@ function regeneratePreview() {
     // the circumference, so fit each tile in its own box rather than fitting
     // the combined tiled-source aspect into the canvas (which would
     // letterbox tiles when bandLength ≪ circumference).
-    perTileFit: params.shape === 'customProfile'
+    perTileFit: params.shape === 'customProfile' || params.shape === 'polyProfile'
   });
   const processed = processImage(raster, {
     brightness: params.brightness,
@@ -2635,6 +2732,19 @@ function regenerateMesh() {
         outerStart: 0,         // splice puts the resampled band at the front
         outerLength: Ny
       });
+    } else if (params.shape === 'polyProfile') {
+      if (!customDims) return;
+      const { scaled, band, sides, sideWidth } = customDims;
+      const Ny = heightmap.height;
+      const resampled = resampleSlice(scaled, band.startIdx, band.length, Ny);
+      const profilePts = spliceSlice(scaled, band.startIdx, band.length, resampled);
+      geom = buildPolyProfileGeometry(heightmap, {
+        profile: profilePts,
+        outerStart: 0,
+        outerLength: Ny,
+        sides,
+        sideWidth
+      });
     } else {
       geom = buildReliefGeometry(heightmap, {
         plateW: params.plateW,
@@ -2760,6 +2870,15 @@ function exportFilename(ext, params) {
       ? state.profileFilename.replace(/\.[^.]+$/, '').replace(/[^A-Za-z0-9_-]+/g, '_')
       : 'profile';
     return `${name}_${profileTag}_r${rf}xh${hf}_h${f}mm${c}.${ext}`;
+  }
+  if (params.shape === 'polyProfile') {
+    const rf = stripTrailing(params.radiusFactor);
+    const hf = stripTrailing(params.heightFactor);
+    const N = params.sides || 4;
+    const profileTag = state.profileFilename
+      ? state.profileFilename.replace(/\.[^.]+$/, '').replace(/[^A-Za-z0-9_-]+/g, '_')
+      : 'profile';
+    return `${name}_${profileTag}_poly${N}_r${rf}xh${hf}_h${f}mm${c}.${ext}`;
   }
   if (params.shape === 'stlWrap') {
     const wrapTag = state.wrapStlFilename

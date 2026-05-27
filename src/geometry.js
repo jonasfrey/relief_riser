@@ -1557,6 +1557,170 @@ export function buildRectProfileGeometry(heightmap, opts) {
 // Tile a finished geometry along the given world axis. Each copy is shifted
 // by step = bbox(axis) + offsetMm, and the whole assembly is recentered so
 // the original center on that axis is preserved. vertexColors are
+export function estimatePolyProfileTriangleCount(Nface, Np) {
+  // Toroidal grid Nface × Np, both directions wrap closed → 2·Nface·Np triangles.
+  return 2 * Nface * Np;
+}
+
+// Sweep a closed 2D profile along a regular-polygon path. Each edge of the
+// N-gon carries the full profile cross-section; the "outer band" of the
+// profile (already resampled to exactly Ny = heightmap.height points) is
+// offset outward by the relief.
+//
+// Coordinate convention
+//   - Profile X = distance outward from the polygon face (face sits at r=0).
+//   - Profile Y = axial coord → world Z.
+//   - Image columns wrap once around the full polygon perimeter; image rows
+//     map onto outer-band points (row 0 → top/high-Z end of the band).
+//
+// Inputs
+//   heightmap:       { data: Float32Array(Nx*Ny), width: Nx, height: Ny }
+//   opts.sides:       number of polygon sides (N)
+//   opts.sideWidth:   outer side length W (mm)
+//   opts.profile:     Array of [r, z] pairs, closed loop, no duplicate end
+//   opts.outerStart:  index of first outer-band point
+//   opts.outerLength: number of consecutive outer-band points (must equal Ny)
+//
+// Topology: torus — both the angular ring (Nface = N·(Nx−1)) and the profile
+// loop (Np = profile.length) wrap closed.
+export function buildPolyProfileGeometry(heightmap, opts) {
+  const Nx = heightmap.width;
+  const Ny = heightmap.height;
+  if (Nx < 3 || Ny < 2) {
+    throw new Error('PolyProfile mesh requires Nx >= 3 and Ny >= 2');
+  }
+  const profile = opts.profile;
+  if (!Array.isArray(profile) || profile.length < 3) {
+    throw new Error('PolyProfile: profile must be a closed loop of at least 3 points');
+  }
+  const Np = profile.length;
+  const N = Math.max(3, Math.min(64, opts.sides | 0));
+  const W = opts.sideWidth;
+
+  const outerStart  = opts.outerStart | 0;
+  const outerLength = opts.outerLength | 0;
+  if (outerLength !== Ny) {
+    throw new Error(`PolyProfile: outer band length (${outerLength}) must equal Ny (${Ny})`);
+  }
+
+  const tanHalfAngle = Math.tan(Math.PI / N);
+  const apothem = W / (2 * tanHalfAngle);
+  const Nface = N * (Nx - 1);   // angular vertices around polygon (corners shared)
+
+  // Mark outer-band profile indices and their image row 0..Ny−1.
+  const bandStartZ = profile[outerStart][1];
+  const bandEndZ   = profile[(outerStart + outerLength - 1) % Np][1];
+  const bandGoesDown = bandStartZ >= bandEndZ;
+  const outerRow = new Int32Array(Np).fill(-1);
+  for (let k = 0; k < outerLength; k++) {
+    const row = bandGoesDown ? k : (outerLength - 1 - k);
+    outerRow[(outerStart + k) % Np] = row;
+  }
+
+  // Clamp tiny-negative r (CAD round-trip noise) to 0; reject real negatives
+  // that would punch through the polygon center.
+  const AXIS_TOL = 1e-3;
+  let minR = Infinity;
+  for (let i = 0; i < profile.length; i++) {
+    const r = profile[i][0];
+    if (r < 0 && r > -AXIS_TOL) {
+      profile[i] = [0, profile[i][1]];
+    } else if (r < minR) {
+      minR = r;
+    }
+  }
+  if (minR < -apothem + AXIS_TOL) {
+    throw new Error('PolyProfile: profile extends inward past the polygon center. Increase side width or reduce profile depth.');
+  }
+
+  // Map ring index → heightmap column (Nx columns wrap full perimeter)
+  const ringToCol = (ring) => {
+    const f = (ring / Nface) * Nx;
+    return Math.round(f) % Nx;
+  };
+
+  // Face normals / tangents
+  const cosT = new Float32Array(N);
+  const sinT = new Float32Array(N);
+  for (let k = 0; k < N; k++) {
+    const t = (k * 2 * Math.PI) / N;
+    cosT[k] = Math.cos(t);
+    sinT[k] = Math.sin(t);
+  }
+
+  const totalVerts = Nface * Np;
+  const positions = new Float32Array(totalVerts * 3);
+
+  for (let i = 0; i < Np; i++) {
+    const r0 = profile[i][0];
+    const z  = profile[i][1];
+    const row = outerRow[i];
+    const isOuter = row >= 0;
+    for (let ring = 0; ring < Nface; ring++) {
+      const k = Math.floor(ring / (Nx - 1));
+      const seg = ring - k * (Nx - 1);
+      const s = (seg / (Nx - 1)) * W - W / 2;
+
+      let r = r0;
+      if (isOuter) {
+        const col = ringToCol(ring);
+        r += heightmap.data[col + row * Nx];
+      }
+
+      const cT = cosT[k], sT = sinT[k];
+      const x = (apothem + r) * cT - s * sT;
+      const y = (apothem + r) * sT + s * cT;
+
+      const vi = (ring * Np + i) * 3;
+      positions[vi]     = x;
+      positions[vi + 1] = y;
+      positions[vi + 2] = z;
+    }
+  }
+
+  // Determine winding direction so triangles face outward from the solid.
+  let signedArea = 0;
+  for (let i = 0; i < Np; i++) {
+    const a = profile[i], b = profile[(i + 1) % Np];
+    signedArea += (b[0] - a[0]) * (b[1] + a[1]) * 0.5;
+  }
+  const flip = signedArea < 0;
+
+  const triCount = estimatePolyProfileTriangleCount(Nface, Np);
+  const indices = new Uint32Array(triCount * 3);
+  let p = 0;
+
+  const idx = (ring, i) => ((ring % Nface + Nface) % Nface) * Np + ((i % Np + Np) % Np);
+  for (let ring = 0; ring < Nface; ring++) {
+    for (let i = 0; i < Np; i++) {
+      const a = idx(ring,     i);
+      const b = idx(ring + 1, i);
+      const c = idx(ring + 1, i + 1);
+      const d = idx(ring,     i + 1);
+      if (flip) {
+        indices[p++] = a; indices[p++] = b; indices[p++] = c;
+        indices[p++] = a; indices[p++] = c; indices[p++] = d;
+      } else {
+        indices[p++] = a; indices[p++] = c; indices[p++] = b;
+        indices[p++] = a; indices[p++] = d; indices[p++] = c;
+      }
+    }
+  }
+
+  return {
+    positions,
+    indices,
+    triCount,
+    vertCount: totalVerts,
+    Nx,
+    Ny,
+    Np,
+    Nface,
+    outerStart,
+    outerLength
+  };
+}
+
 // replicated alongside positions/indices. count <= 1 returns inputs as-is.
 // axis: 'x' | 'y' | 'z' (default 'y').
 export function replicateGeometry(geom, vertexColors, count, offsetMm, axis = 'y') {

@@ -350,6 +350,7 @@
               <option value="rectProfile">Rectangular tube (image wraps around outer face)</option>
               <option value="polygon">Polygon prism (same image on each side)</option>
               <option value="customProfile">Custom profile (revolved DXF)</option>
+              <option value="polyProfile">Polygon profile (DXF swept along polygon)</option>
               <option value="stlWrap">Custom STL wrap (relief on outer surface)</option>
             </select>
           </div>
@@ -479,7 +480,7 @@
                 Auto Repeat Y to keep tile physical size constant
               </label>
             </div>
-            <p class="hint">DXF should be a single closed loop of LINE / ARC / CIRCLE / ELLIPSE / LWPOLYLINE entities. Profile X = radial distance from rotation (Z) axis; Profile Y = axial coord. The "outer band" (right-facing arc whose X is within this fraction of max X) gets the relief offset. With Auto Repeat Y on, swapping profiles only changes how many rows fit; one tile stays the same physical size.</p>
+            <p class="hint" id="customProfileHint">DXF should be a single closed loop of LINE / ARC / CIRCLE / ELLIPSE / LWPOLYLINE entities. Profile X = radial distance from rotation (Z) axis; Profile Y = axial coord. The "outer band" (right-facing arc whose X is within this fraction of max X) gets the relief offset. With Auto Repeat Y on, swapping profiles only changes how many rows fit; one tile stays the same physical size.</p>
           </div>
 
           <div class="control hidden" id="sidesControl">
