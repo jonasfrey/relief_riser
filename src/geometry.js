@@ -1757,15 +1757,25 @@ export function buildPolyProfileGeometry(heightmap, opts) {
     }
   }
 
-  // Inner surface (inward normal — toward polygon center)
+  // Inner-band surface. Each strip of the inner band traces one segment of
+  // the profile's interior loop (e.g. for a rectangular profile: bottom
+  // floor → inner wall → top ceiling). For the result to be a closed solid,
+  // every triangle's normal has to point AWAY from the wall material — into
+  // empty space — which means outward-facing for the bottom/top sub-strips
+  // and inward-toward-polygon-center for the side sub-strip. All three
+  // come out correctly with the SAME winding the outer surface uses
+  // (a→d→c, a→c→b); reversing the winding here (the prior version) put
+  // every inner-band triangle facing into the wall material instead, so
+  // back-face culling rendered them invisible and the front wall of the
+  // prism looked transparent.
   for (let j = 0; j < NyInner - 1; j++) {
     for (let ring = 0; ring < Nface; ring++) {
       const a = inner(ring,     j);
       const b = inner(ring + 1, j);
       const c = inner(ring + 1, j + 1);
       const d = inner(ring,     j + 1);
-      indices[p++] = a; indices[p++] = c; indices[p++] = d;
-      indices[p++] = a; indices[p++] = b; indices[p++] = c;
+      indices[p++] = a; indices[p++] = d; indices[p++] = c;
+      indices[p++] = a; indices[p++] = c; indices[p++] = b;
     }
   }
 
