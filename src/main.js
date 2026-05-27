@@ -1168,9 +1168,28 @@ function updateShapeLabels() {
   } else if (isPoly) {
     els.plateWLabel.textContent = 'Side width W (mm)';
   } else if (isPolyProfile) {
-    els.plateWLabel.textContent = 'Radius R (mm)';
+    els.plateWLabel.textContent = 'Radius offset (mm)';
   } else {
     els.plateWLabel.textContent = 'Width W (mm)';
+  }
+  // PolyProfile uses the slider as a signed offset on top of the profile's
+  // intrinsic radius; other shapes use it as a positive width/radius. Swap
+  // slider attributes when crossing the polyProfile boundary so the user
+  // gets the right range and default. Preserve the value separately for
+  // each mode via state so toggling back and forth doesn't clobber it.
+  const wasOffsetMode = els.plateW.dataset.mode === 'polyProfileOffset';
+  if (isPolyProfile && !wasOffsetMode) {
+    state._savedPlateW = els.plateW.value;
+    const v = state._savedPolyProfileOffset != null ? state._savedPolyProfileOffset : '0';
+    els.plateW.min = '-200'; els.plateW.max = '200'; els.plateW.value = v;
+    els.plateWNum.min = '-200'; els.plateWNum.max = '200'; els.plateWNum.value = v;
+    els.plateW.dataset.mode = 'polyProfileOffset';
+  } else if (!isPolyProfile && wasOffsetMode) {
+    state._savedPolyProfileOffset = els.plateW.value;
+    const v = state._savedPlateW != null ? state._savedPlateW : '18';
+    els.plateW.min = '5'; els.plateW.max = '300'; els.plateW.value = v;
+    els.plateWNum.min = '5'; els.plateWNum.max = '300'; els.plateWNum.value = v;
+    els.plateW.dataset.mode = '';
   }
   els.sidesControl.classList.toggle('hidden', !(isPoly || isPolyProfile));
   els.closedBottomControl.classList.toggle('hidden', !(isPoly || isCyl || isStlWrap));
@@ -2403,12 +2422,19 @@ function polyProfileDims(params) {
   const base = customProfileDims(params);
   if (!base) return null;
   const sides = parseInt(els.sides.value, 10) || 4;
-  const radius = parseFloat(els.plateW.value);
+  // Slider is an OFFSET on top of the profile's natural radius — the
+  // profile's innermost X point already defines a polygon-center distance,
+  // so the slider just shifts the polygon in/out from there.
+  const offset = parseFloat(els.plateW.value) || 0;
+  let profileMinX = Infinity;
+  for (const p of base.scaled) if (p[0] < profileMinX) profileMinX = p[0];
+  if (!isFinite(profileMinX)) return null;
+  const radius = profileMinX + offset;
   if (!(radius > 0)) return null;
   const apothem = radius * Math.cos(Math.PI / sides);
   const sideWidth = 2 * radius * Math.sin(Math.PI / sides);
   const perimeter = sides * sideWidth;
-  return { ...base, perimeter, sides, radius, apothem, sideWidth };
+  return { ...base, perimeter, sides, radius, apothem, sideWidth, radiusOffset: offset, profileMinX };
 }
 
 function estimateTrisForShape(targetW, targetH, shape, sides, hasChamfer, profileLen) {
