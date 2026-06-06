@@ -1,0 +1,31 @@
+# Run the 3dmodels workspace + Claude Code in a container.
+#
+# Quick start:   ./claude-docker.sh
+# Manual:        HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose run --rm claude
+#
+# The workspace is bind-mounted (not copied), so edits persist on the host
+# and the big .3mf files never enter the image. Claude Code uses its OWN
+# isolated config (the `claude-config` volume) — separate from your host
+# login. The first time you run it, you'll sign in inside the container; that
+# login then persists in the volume across runs.
+services:
+  claude:
+    build:
+      context: ./docker
+      args:
+        USER_UID: ${HOST_UID:-1000}
+        USER_GID: ${HOST_GID:-1000}
+    image: 3dmodels-claude:latest
+    init: true
+    stdin_open: true   # keep STDIN open for interactive Claude Code
+    tty: true          # allocate a TTY
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+      # Isolated, persistent Claude config (home dir) — NOT the host's.
+      # Seeded from the image on first run; keeps its own login/settings.
+      - claude-config:/home/claude
+    command: claude
+
+volumes:
+  claude-config:
