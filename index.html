@@ -352,7 +352,29 @@
               <option value="customProfile">Custom profile (revolved DXF)</option>
               <option value="polyProfile">Polygon profile (DXF swept along polygon)</option>
               <option value="stlWrap">Custom STL wrap (relief on outer surface)</option>
+              <option value="stlFace">STL face (relief on a picked face)</option>
             </select>
+          </div>
+
+          <div class="hidden" id="stlFaceControls">
+            <div class="control">
+              <label for="faceStlFile">Target STL</label>
+              <div style="display:flex;gap:0.4rem;align-items:center;">
+                <label class="btn">
+                  Choose .stl…
+                  <input type="file" id="faceStlFile" accept=".stl,model/stl" hidden />
+                </label>
+                <button id="faceStlResetBtn" class="btn" type="button">Use default</button>
+              </div>
+              <div id="faceStlStatus" class="hint">No STL loaded</div>
+            </div>
+            <div class="control">
+              <label for="facePickRot">Relief rotation (°)</label>
+              <input type="range" id="facePickRot" min="0" max="360" step="1" value="0" />
+              <input type="number" id="facePickRotNum" min="0" max="360" step="1" value="0" />
+            </div>
+            <div id="facePickStatus" class="hint">Click a point on the STL in the 3D view to place the relief.</div>
+            <p class="hint">Upload an STL, then click a flat face in the 3D preview. The relief automatically covers that whole face — it follows the face's real outline (a semicircular arch, a circle, an L-shape, …), not just a rectangle. The image is embossed on top along the face normal; "Base thickness" sets the minimum slab thickness across the face, and the whole STL is kept in the export. Use "Relief rotation" to spin the image on the face.</p>
           </div>
 
           <div class="hidden" id="stlWrapControls">

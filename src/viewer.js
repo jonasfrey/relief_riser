@@ -60,6 +60,18 @@ export class Viewer {
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.08;
 
+    // Surface picking (used by the "stl face" shape mode). The pick target is a
+    // standalone mesh kept out of the scene — it exists only for raycasting
+    // against the raw STL so a click returns the true surface point + normal.
+    this._raycaster = new THREE.Raycaster();
+    this._pickMesh = null;
+    this._pickGeom = null;
+    this._onPick = null;
+    this._pickEnabled = false;
+    this._pickDown = null;
+    this._pickDownHandler = (ev) => { this._pickDown = { x: ev.clientX, y: ev.clientY }; };
+    this._pickClickHandler = (ev) => this._handlePickClick(ev);
+
     this.scene.add(new THREE.AmbientLight(0xffffff, 0.5));
     const key = new THREE.DirectionalLight(0xffffff, 0.85);
     key.position.set(80, -60, 120);
@@ -208,6 +220,63 @@ export class Viewer {
     this._needsFrame = true;
   }
 
+  // Set the geometry that click-picking raycasts against. Pass the raw STL
+  // positions (non-indexed: 3 verts per triangle) so a hit returns that
+  // triangle's face normal in the same coords the mesh is displayed in.
+  setPickTarget(positions) {
+    if (this._broken) return;
+    if (this._pickGeom) this._pickGeom.dispose();
+    this._pickGeom = new THREE.BufferGeometry();
+    this._pickGeom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    this._pickGeom.computeBoundingBox();
+    this._pickGeom.computeBoundingSphere();
+    this._pickMesh = new THREE.Mesh(this._pickGeom);
+  }
+
+  enablePicking(onPick) {
+    if (this._broken) return;
+    this._onPick = onPick;
+    if (this._pickEnabled) return;
+    this._pickEnabled = true;
+    const el = this.renderer.domElement;
+    el.addEventListener('pointerdown', this._pickDownHandler);
+    el.addEventListener('click', this._pickClickHandler);
+  }
+
+  disablePicking() {
+    this._onPick = null;
+    if (!this._pickEnabled) return;
+    this._pickEnabled = false;
+    const el = this.renderer.domElement;
+    el.removeEventListener('pointerdown', this._pickDownHandler);
+    el.removeEventListener('click', this._pickClickHandler);
+  }
+
+  _handlePickClick(ev) {
+    if (this._broken || !this._pickMesh || !this._onPick) return;
+    // Ignore clicks that were really orbit drags (pointer moved noticeably).
+    if (this._pickDown) {
+      const dx = ev.clientX - this._pickDown.x;
+      const dy = ev.clientY - this._pickDown.y;
+      if (dx * dx + dy * dy > 25) return;
+    }
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const ndc = new THREE.Vector2(
+      ((ev.clientX - rect.left) / rect.width) * 2 - 1,
+      -((ev.clientY - rect.top) / rect.height) * 2 + 1
+    );
+    this._raycaster.setFromCamera(ndc, this.camera);
+    const hits = this._raycaster.intersectObject(this._pickMesh, false);
+    if (!hits.length) return;
+    const h = hits[0];
+    const n = h.face ? h.face.normal : new THREE.Vector3(0, 0, 1);
+    this._onPick({
+      point: [h.point.x, h.point.y, h.point.z],
+      normal: [n.x, n.y, n.z],
+      faceIndex: h.faceIndex != null ? h.faceIndex : -1
+    });
+  }
+
   setVisibility(key, visible) {
     this.show[key] = !!visible;
     if (this._broken) return;
@@ -265,6 +334,9 @@ export class Viewer {
   dispose() {
     cancelAnimationFrame(this._raf);
     if (this._ro) this._ro.disconnect();
+    this.disablePicking();
+    if (this._pickGeom) { this._pickGeom.dispose(); this._pickGeom = null; }
+    this._pickMesh = null;
     this._disposeMeshes();
     if (this.solidMaterial) this.solidMaterial.dispose();
     if (this.wireMaterial) this.wireMaterial.dispose();

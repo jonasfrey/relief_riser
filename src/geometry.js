@@ -25,6 +25,12 @@ export function estimateSTLWrapTriangleCount(Nx, Ny) {
   return 4 * Nx * Ny;
 }
 
+export function estimateSTLFaceTriangleCount(Nx, Ny) {
+  // Just the embossed relief patch (a flat plate's topology). The untouched
+  // STL's own triangles are added by the caller, which knows their fixed count.
+  return estimateTriangleCount(Nx, Ny);
+}
+
 export function estimateEllipseTriangleCount(Nx, Ny) {
   // outer + inner shells: 4·Nx·(Ny−1); top cap (annular): 2·Nx; bottom: up to
   // 6·Nx when a partial hole adds side walls + inner floor. Use the upper
@@ -167,6 +173,294 @@ export function buildReliefGeometry(heightmap, opts) {
     vertCount: totalVerts,
     Nx,
     Ny
+  };
+}
+
+// Flood-fill the flat face that contains triangle `startTri`: the connected set
+// of triangles whose normal stays within `angleTolDeg` of the seed triangle's
+// normal. Comparing every candidate to the SEED (not its neighbour) stops the
+// fill from leaking around a gently curved edge (e.g. a rounded top) onto a
+// surface that isn't really part of the flat face.
+//
+// `rotation` (radians) spins the in-plane (u,v) frame around the face normal so
+// the relief image can be oriented on the face. Returns null if startTri is out
+// of range. The result describes the face well enough to both size the relief
+// (bbox) and rebuild it (triangle list, welded ids, basis, origin).
+export function extractCoplanarFace(stl, startTri, rotation = 0, angleTolDeg = 12) {
+  const pos = stl.positions;
+  const triCount = stl.triCount;
+  if (!(startTri >= 0) || startTri >= triCount) return null;
+
+  const triNormal = (t) => {
+    const o = t * 9;
+    const ax = pos[o],     ay = pos[o + 1], az = pos[o + 2];
+    const bx = pos[o + 3], by = pos[o + 4], bz = pos[o + 5];
+    const cx = pos[o + 6], cy = pos[o + 7], cz = pos[o + 8];
+    const ux = bx - ax, uy = by - ay, uz = bz - az;
+    const vx = cx - ax, vy = cy - ay, vz = cz - az;
+    let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    const l = Math.hypot(nx, ny, nz) || 1;
+    return [nx / l, ny / l, nz / l];
+  };
+
+  // Weld vertices by quantized position so we can build edge adjacency.
+  const vmap = new Map();
+  const vids = new Int32Array(triCount * 3);
+  const q = (v) => Math.round(v * 10000);
+  let nextId = 0;
+  for (let i = 0; i < triCount * 3; i++) {
+    const o = i * 3;
+    const key = q(pos[o]) + ',' + q(pos[o + 1]) + ',' + q(pos[o + 2]);
+    let id = vmap.get(key);
+    if (id === undefined) { id = nextId++; vmap.set(key, id); }
+    vids[i] = id;
+  }
+
+  const edgeKey = (a, b) => (a < b ? a * 4294967296 + b : b * 4294967296 + a);
+  const edgeMap = new Map();
+  for (let t = 0; t < triCount; t++) {
+    const a = vids[t * 3], b = vids[t * 3 + 1], c = vids[t * 3 + 2];
+    const es = [[a, b], [b, c], [c, a]];
+    for (const [u, v] of es) {
+      const k = edgeKey(u, v);
+      let arr = edgeMap.get(k);
+      if (!arr) { arr = []; edgeMap.set(k, arr); }
+      arr.push(t);
+    }
+  }
+
+  const n0 = triNormal(startTri);
+  const cosTol = Math.cos(angleTolDeg * Math.PI / 180);
+  const visited = new Uint8Array(triCount);
+  const face = [startTri];
+  visited[startTri] = 1;
+  const stack = [startTri];
+  while (stack.length) {
+    const t = stack.pop();
+    const a = vids[t * 3], b = vids[t * 3 + 1], c = vids[t * 3 + 2];
+    const es = [[a, b], [b, c], [c, a]];
+    for (const [u, v] of es) {
+      const arr = edgeMap.get(edgeKey(u, v));
+      if (!arr) continue;
+      for (const nb of arr) {
+        if (visited[nb]) continue;
+        const nn = triNormal(nb);
+        if (n0[0] * nn[0] + n0[1] * nn[1] + n0[2] * nn[2] < cosTol) continue;
+        visited[nb] = 1;
+        face.push(nb);
+        stack.push(nb);
+      }
+    }
+  }
+
+  // In-plane basis (tu, tv) ⟂ n0, optionally spun by `rotation`. Origin is the
+  // seed triangle's first vertex.
+  const nx = n0[0], ny = n0[1], nz = n0[2];
+  let ux = 0, uy = 0, uz = 1;
+  if (Math.abs(nz) > 0.9) { ux = 1; uy = 0; uz = 0; }
+  let tux = uy * nz - uz * ny, tuy = uz * nx - ux * nz, tuz = ux * ny - uy * nx;
+  const tl = Math.hypot(tux, tuy, tuz) || 1;
+  tux /= tl; tuy /= tl; tuz /= tl;
+  let tvx = ny * tuz - nz * tuy, tvy = nz * tux - nx * tuz, tvz = nx * tuy - ny * tux;
+  if (rotation) {
+    const c = Math.cos(rotation), s = Math.sin(rotation);
+    const u2x = tux * c + tvx * s, u2y = tuy * c + tvy * s, u2z = tuz * c + tvz * s;
+    const v2x = -tux * s + tvx * c, v2y = -tuy * s + tvy * c, v2z = -tuz * s + tvz * c;
+    tux = u2x; tuy = u2y; tuz = u2z;
+    tvx = v2x; tvy = v2y; tvz = v2z;
+  }
+
+  const o0 = startTri * 9;
+  const origin = [pos[o0], pos[o0 + 1], pos[o0 + 2]];
+  let umin = Infinity, umax = -Infinity, vmin = Infinity, vmax = -Infinity;
+  for (const t of face) {
+    for (let k = 0; k < 3; k++) {
+      const o = (t * 3 + k) * 3;
+      const dx = pos[o] - origin[0], dy = pos[o + 1] - origin[1], dz = pos[o + 2] - origin[2];
+      const u = dx * tux + dy * tuy + dz * tuz;
+      const v = dx * tvx + dy * tvy + dz * tvz;
+      if (u < umin) umin = u; if (u > umax) umax = u;
+      if (v < vmin) vmin = v; if (v > vmax) vmax = v;
+    }
+  }
+
+  return {
+    tris: face,
+    vids,
+    basis: { tu: [tux, tuy, tuz], tv: [tvx, tvy, tvz], n: n0, origin },
+    bbox: { umin, umax, vmin, vmax }
+  };
+}
+
+// Emboss a relief that automatically conforms to a picked flat face of an STL.
+// The whole STL is preserved; on top of the picked face we add a slab whose
+// outline matches the face exactly (the face's own triangles form the slab's
+// top + bottom), and whose local thickness = baseThickness + heightmap sampled
+// across the face's (u,v) bounding box. So the image fills the face's silhouette
+// (e.g. a semicircular arch), not just a rectangle.
+//
+// opts: {
+//   stl,                         // { positions, triCount }
+//   region,                      // result of extractCoplanarFace, or null
+//   baseThickness                // minimum slab thickness over the whole face
+// }
+// With region === null the STL alone is returned so the user can see it and
+// click a face. faceTopVertCount + faceTopUV let the caller color the relief
+// surface from the image and leave the rest of the model neutral.
+export function buildSTLFaceGeometry(heightmap, opts) {
+  const stl = opts.stl;
+  if (!stl || !stl.positions || !stl.triCount) {
+    throw new Error('STL face mode needs a loaded STL');
+  }
+  const stlVertCount = stl.triCount * 3;
+
+  const stlOnly = () => {
+    const positions = stl.positions.slice();
+    const indices = new Uint32Array(stlVertCount);
+    for (let i = 0; i < stlVertCount; i++) indices[i] = i;
+    return {
+      positions, indices,
+      triCount: stl.triCount,
+      vertCount: stlVertCount,
+      faceTopVertCount: 0, faceTopUV: null, reliefVertCount: 0
+    };
+  };
+
+  const region = opts.region;
+  if (!region || !region.tris.length) return stlOnly();
+
+  const pos = stl.positions;
+  const { tris, vids, basis, bbox } = region;
+  const { tu, tv, n, origin } = basis;
+  const base = opts.baseThickness || 0;
+  const W = heightmap.width, H = heightmap.height;
+  const data = heightmap.data;
+  const uSpan = (bbox.umax - bbox.umin) || 1;
+  const vSpan = (bbox.vmax - bbox.vmin) || 1;
+
+  // Bilinear height sample at face coordinate (u, v). Image row 0 maps to the
+  // top of the face (+v) so the relief reads upright.
+  const sampleH = (u, v) => {
+    const fx = (u - bbox.umin) / uSpan;
+    const fy = (v - bbox.vmin) / vSpan;
+    let px = fx * (W - 1);
+    let py = (1 - fy) * (H - 1);
+    if (px < 0) px = 0; else if (px > W - 1) px = W - 1;
+    if (py < 0) py = 0; else if (py > H - 1) py = H - 1;
+    const x0 = px | 0, y0 = py | 0;
+    const x1 = x0 + 1 < W ? x0 + 1 : x0;
+    const y1 = y0 + 1 < H ? y0 + 1 : y0;
+    const dx = px - x0, dy = py - y0;
+    const h00 = data[y0 * W + x0], h10 = data[y0 * W + x1];
+    const h01 = data[y1 * W + x0], h11 = data[y1 * W + x1];
+    return (h00 * (1 - dx) + h10 * dx) * (1 - dy) + (h01 * (1 - dx) + h11 * dx) * dy;
+  };
+
+  const F = tris.length;
+  // Vertices: top (displaced) then bottom (original face) — each F*3.
+  const topCount = F * 3;
+  const botCount = F * 3;
+
+  // Boundary edges (used by exactly one face triangle) get a side wall.
+  const edgeKey = (a, b) => (a < b ? a * 4294967296 + b : b * 4294967296 + a);
+  const edgeUse = new Map(); // key -> [count, f, k]
+  for (let f = 0; f < F; f++) {
+    const t = tris[f];
+    const ids = [vids[t * 3], vids[t * 3 + 1], vids[t * 3 + 2]];
+    for (let k = 0; k < 3; k++) {
+      const key = edgeKey(ids[k], ids[(k + 1) % 3]);
+      const e = edgeUse.get(key);
+      if (e) e[0]++; else edgeUse.set(key, [1, f, k]);
+    }
+  }
+  const boundary = [];
+  for (const e of edgeUse.values()) if (e[0] === 1) boundary.push([e[1], e[2]]);
+
+  const reliefVertCount = topCount + botCount;
+  const totalVerts = reliefVertCount + stlVertCount;
+  const positions = new Float32Array(totalVerts * 3);
+  const faceTopUV = new Float32Array(topCount * 2);
+
+  // Face centroid (for orienting side walls outward).
+  let ccx = 0, ccy = 0, ccz = 0;
+  for (let f = 0; f < F; f++) {
+    const t = tris[f];
+    for (let k = 0; k < 3; k++) {
+      const o = (t * 3 + k) * 3;
+      ccx += pos[o]; ccy += pos[o + 1]; ccz += pos[o + 2];
+    }
+  }
+  ccx /= topCount; ccy /= topCount; ccz /= topCount;
+
+  // Fill top + bottom vertices.
+  const botBase = topCount;
+  for (let f = 0; f < F; f++) {
+    const t = tris[f];
+    for (let k = 0; k < 3; k++) {
+      const o = (t * 3 + k) * 3;
+      const x = pos[o], y = pos[o + 1], z = pos[o + 2];
+      const dx = x - origin[0], dy = y - origin[1], dz = z - origin[2];
+      const u = dx * tu[0] + dy * tu[1] + dz * tu[2];
+      const v = dx * tv[0] + dy * tv[1] + dz * tv[2];
+      const h = base + sampleH(u, v);
+      const ti = f * 3 + k;
+      positions[ti * 3]     = x + n[0] * h;
+      positions[ti * 3 + 1] = y + n[1] * h;
+      positions[ti * 3 + 2] = z + n[2] * h;
+      faceTopUV[ti * 2]     = (u - bbox.umin) / uSpan;
+      faceTopUV[ti * 2 + 1] = (v - bbox.vmin) / vSpan;
+      const bi = botBase + f * 3 + k;
+      positions[bi * 3]     = x;
+      positions[bi * 3 + 1] = y;
+      positions[bi * 3 + 2] = z;
+    }
+  }
+  // STL vertices appended after the relief slab.
+  positions.set(stl.positions, reliefVertCount * 3);
+
+  // Index buffer: top (CCW, +n out) + bottom (reversed, −n out) + side walls + STL.
+  const triTotal = F + F + boundary.length * 2 + stl.triCount;
+  const indices = new Uint32Array(triTotal * 3);
+  let p = 0;
+  for (let f = 0; f < F; f++) {
+    const a = f * 3, b = f * 3 + 1, c = f * 3 + 2;
+    indices[p++] = a; indices[p++] = b; indices[p++] = c;        // top
+    const ba = botBase + a, bb = botBase + b, bc = botBase + c;
+    indices[p++] = ba; indices[p++] = bc; indices[p++] = bb;     // bottom (reversed)
+  }
+  // Side walls: for each boundary edge connect bottom→top. Pick the winding
+  // whose normal points away from the face centroid.
+  for (const [f, k] of boundary) {
+    const tA = f * 3 + k, tB = f * 3 + (k + 1) % 3;       // top verts
+    const bA = botBase + tA, bB = botBase + tB;           // bottom verts
+    const ax = positions[bA * 3], ay = positions[bA * 3 + 1], az = positions[bA * 3 + 2];
+    const bx = positions[bB * 3], by = positions[bB * 3 + 1], bz = positions[bB * 3 + 2];
+    // Edge dir × n gives the wall normal candidate.
+    const ex = bx - ax, ey = by - ay, ez = bz - az;
+    const wnx = ey * n[2] - ez * n[1];
+    const wny = ez * n[0] - ex * n[2];
+    const wnz = ex * n[1] - ey * n[0];
+    // Outward = away from the face centroid (measured at the edge midpoint).
+    const mx = (ax + bx) / 2 - ccx, my = (ay + by) / 2 - ccy, mz = (az + bz) / 2 - ccz;
+    const outward = wnx * mx + wny * my + wnz * mz >= 0;
+    if (outward) {
+      indices[p++] = bA; indices[p++] = bB; indices[p++] = tB;
+      indices[p++] = bA; indices[p++] = tB; indices[p++] = tA;
+    } else {
+      indices[p++] = bA; indices[p++] = tB; indices[p++] = bB;
+      indices[p++] = bA; indices[p++] = tA; indices[p++] = tB;
+    }
+  }
+  // STL triangles.
+  for (let i = 0; i < stlVertCount; i++) indices[p++] = reliefVertCount + i;
+
+  return {
+    positions, indices,
+    triCount: triTotal,
+    vertCount: totalVerts,
+    faceTopVertCount: topCount,
+    faceTopUV,
+    reliefVertCount
   };
 }
 

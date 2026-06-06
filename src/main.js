@@ -24,6 +24,8 @@ import {
   buildCustomProfileGeometry,
   buildPolyProfileGeometry,
   buildSTLWrapGeometry,
+  buildSTLFaceGeometry,
+  extractCoplanarFace,
   replicateGeometry,
   estimateTriangleCount,
   estimateCylindricalTriangleCount,
@@ -32,7 +34,8 @@ import {
   estimatePolygonPrismTriangleCount,
   estimateCustomProfileTriangleCount,
   estimatePolyProfileTriangleCount,
-  estimateSTLWrapTriangleCount
+  estimateSTLWrapTriangleCount,
+  estimateSTLFaceTriangleCount
 } from './geometry.js';
 import {
   loadDxfFromFile,
@@ -135,6 +138,12 @@ const els = {
   wrapStlResetBtn: $('wrapStlResetBtn'),
   wrapStlStatus: $('wrapStlStatus'),
   wrapAutoTiles: $('wrapAutoTiles'),
+  stlFaceControls: $('stlFaceControls'),
+  faceStlFile: $('faceStlFile'),
+  faceStlResetBtn: $('faceStlResetBtn'),
+  faceStlStatus: $('faceStlStatus'),
+  facePickRot: $('facePickRot'),     facePickRotNum: $('facePickRotNum'),
+  facePickStatus: $('facePickStatus'),
   profileFile: $('profileFile'),
   profileResetBtn: $('profileResetBtn'),
   profileStatus: $('profileStatus'),
@@ -239,7 +248,8 @@ const sliderPairs = [
   ['rectProfY',                'rectProfYNum'],
   ['rectProfThickness',        'rectProfThicknessNum'],
   ['rectProfBottomThickness',  'rectProfBottomThicknessNum'],
-  ['rectProfHeight',           'rectProfHeightNum']
+  ['rectProfHeight',           'rectProfHeightNum'],
+  ['facePickRot',              'facePickRotNum']
 ];
 
 function linkPair(rangeEl, numEl) {
@@ -360,6 +370,12 @@ els.shape.addEventListener('change', () => {
   if (state.shape === 'stlWrap' && !state.wrapStl) {
     loadDefaultWrapStl();   // fire-and-forget; pipeline re-runs when it lands
   }
+  if (state.shape === 'stlFace' && !state.faceStl) {
+    loadDefaultFaceStl();   // fire-and-forget; pipeline re-runs when it lands
+  }
+  // Click-picking only makes sense in face mode; tear it down otherwise so
+  // clicks elsewhere don't get intercepted.
+  if (state.shape !== 'stlFace') viewer.disablePicking();
   onParamChange();
 });
 
@@ -425,6 +441,98 @@ async function loadDefaultWrapStl() {
 function setWrapStlStatus(msg, isError) {
   els.wrapStlStatus.textContent = msg;
   els.wrapStlStatus.style.color = isError ? '#c33' : '';
+}
+
+// ---------- STL face mode ----------
+
+els.faceStlFile.addEventListener('change', async (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  try {
+    const mesh = await loadSTLFromFile(file);
+    setFaceStl(mesh, file.name, 'user');
+  } catch (err) {
+    setFaceStlStatus(`Error: ${err.message}`, true);
+  }
+});
+
+els.faceStlResetBtn.addEventListener('click', () => loadDefaultFaceStl());
+
+async function loadDefaultFaceStl() {
+  setFaceStlStatus('Loading default STL…');
+  try {
+    const mesh = await loadSTLFromUrl('default_wrap.stl');
+    setFaceStl(mesh, 'BIC_lighter_holder_TT_J26_MAXI.stl', 'default');
+  } catch (err) {
+    setFaceStlStatus(`Could not load default STL: ${err.message}`, true);
+  }
+}
+
+// Adopt a freshly loaded STL for face mode: reset the pick (the old point no
+// longer maps to the new surface) and rebuild the preview so it shows.
+function setFaceStl(mesh, filename, source) {
+  state.faceStl = mesh;
+  state.faceStlFilename = filename;
+  state.faceStlSource = source;
+  state.faceStlInfo = computeWrapStlInfo(mesh);
+  state.facePick = null;
+  state.faceRegionCache = null;
+  setFaceStlStatus(formatWrapStlInfo(filename, state.faceStlInfo));
+  setFacePickStatus('Click a point on the STL in the 3D view to place the relief.');
+  viewer.requestFrame();
+  triggerProcessing(true);
+}
+
+function setFaceStlStatus(msg, isError) {
+  els.faceStlStatus.textContent = msg;
+  els.faceStlStatus.style.color = isError ? '#c33' : '';
+}
+
+function setFacePickStatus(msg) {
+  if (els.facePickStatus) els.facePickStatus.textContent = msg;
+}
+
+// Raycast callback fired by the viewer when the user clicks the STL surface.
+// The relief auto-fits the whole flat face under the click, so we just record
+// the clicked triangle and let getFaceRegion() flood-fill its coplanar face.
+function onFacePick(hit) {
+  state.facePick = hit;                       // { point, normal, faceIndex }
+  state.faceRegionCache = null;               // force re-extract for the new face
+  const region = getFaceRegion();
+  if (region) {
+    const wmm = region.bbox.umax - region.bbox.umin;
+    const hmm = region.bbox.vmax - region.bbox.vmin;
+    setFacePickStatus(`Face selected — ${region.tris.length} triangles, ${wmm.toFixed(1)} × ${hmm.toFixed(1)} mm. Click again to pick another face.`);
+  } else {
+    setFacePickStatus('Could not read a face there — try clicking a flatter spot.');
+  }
+  triggerProcessing(true);
+}
+
+// Flood-fill + cache the coplanar face for the current pick and relief rotation.
+// Cheap to call repeatedly; only re-extracts when the face or rotation changes.
+function getFaceRegion() {
+  if (!state.faceStl || !state.facePick || state.facePick.faceIndex < 0) return null;
+  const rotDeg = parseFloat(els.facePickRot.value) || 0;
+  const c = state.faceRegionCache;
+  if (c && c.stl === state.faceStl && c.faceIndex === state.facePick.faceIndex && c.rotDeg === rotDeg) {
+    return c.region;
+  }
+  const region = extractCoplanarFace(state.faceStl, state.facePick.faceIndex, rotDeg * Math.PI / 180);
+  state.faceRegionCache = { stl: state.faceStl, faceIndex: state.facePick.faceIndex, rotDeg, region };
+  return region;
+}
+
+// Keep the raycast target in sync with the loaded STL and enable click-picking
+// while in face mode. Cheap to call repeatedly; the heavy rebuild is gated on
+// the STL identity changing.
+function ensureFacePicking() {
+  if (!state.faceStl) return;
+  if (state._pickTargetStl !== state.faceStl) {
+    viewer.setPickTarget(state.faceStl.positions);
+    state._pickTargetStl = state.faceStl;
+  }
+  viewer.enablePicking(onFacePick);
 }
 
 // Compute the metrics the rasterization pipeline needs: max radius from the
@@ -910,6 +1018,15 @@ const state = {
   wrapStlFilename: null,
   wrapStlSource: null,                // 'default' | 'user' | null
   wrapStlInfo: null,                  // { maxR, height, triCount } | null
+  // Target STL for the "stlFace" shape — the user clicks a point on its
+  // surface and a flat relief patch is embossed there along the face normal.
+  faceStl: null,                      // { positions, triCount } | null
+  faceStlFilename: null,
+  faceStlSource: null,                // 'default' | 'user' | null
+  faceStlInfo: null,                  // { maxR, height, triCount } | null
+  facePick: null,                     // { point:[x,y,z], normal:[x,y,z], faceIndex } | null
+  faceRegionCache: null,              // { stl, faceIndex, rotDeg, region } memo for getFaceRegion()
+  _pickTargetStl: null,               // identity guard so we only rebuild the raycast mesh on STL change
   // 4-point polygon mask in source-image pixel coords. Pixels outside the
   // polygon are replaced with the relief-zero fill color before rasterization,
   // so the rectangular border around a relief design doesn't end up in the
@@ -1161,6 +1278,7 @@ function updateShapeLabels() {
   const isCyl  = state.shape === 'cylindrical';
   const isCustom = state.shape === 'customProfile';
   const isStlWrap = state.shape === 'stlWrap';
+  const isStlFace = state.shape === 'stlFace';
   const isEllipse = state.shape === 'ellipse';
   const isRectProfile = state.shape === 'rectProfile';
   if (isCyl) {
@@ -1196,6 +1314,7 @@ function updateShapeLabels() {
   els.chamferTopControl.classList.toggle('hidden', !isPoly);
   els.customProfileControls.classList.toggle('hidden', !(isCustom || isPolyProfile));
   if (els.stlWrapControls) els.stlWrapControls.classList.toggle('hidden', !isStlWrap);
+  if (els.stlFaceControls) els.stlFaceControls.classList.toggle('hidden', !isStlFace);
   if (els.ellipseControls) els.ellipseControls.classList.toggle('hidden', !isEllipse);
   if (els.rectProfileControls) els.rectProfileControls.classList.toggle('hidden', !isRectProfile);
   // Update profile hint text based on shape
@@ -1220,10 +1339,10 @@ function updateShapeLabels() {
   const plateCtl = els.plateW.closest('.control');
   const plateHCtl = els.plateH.closest('.control');
   const baseCtl = els.baseThickness.closest('.control');
-  if (plateCtl)  plateCtl.classList.toggle('hidden', isCustom || isStlWrap || isEllipse || isRectProfile);
+  if (plateCtl)  plateCtl.classList.toggle('hidden', isCustom || isStlWrap || isStlFace || isEllipse || isRectProfile);
   if (plateHCtl) plateHCtl.classList.add('hidden');
   if (baseCtl)   baseCtl.classList.toggle('hidden', isCustom || isEllipse || isRectProfile || isPolyProfile);
-  if (els.derivedDimsHint) els.derivedDimsHint.classList.toggle('hidden', isCustom || isStlWrap || isEllipse || isRectProfile);
+  if (els.derivedDimsHint) els.derivedDimsHint.classList.toggle('hidden', isCustom || isStlWrap || isStlFace || isEllipse || isRectProfile);
 }
 
 function updateResolutionVisibility() {
@@ -1816,6 +1935,7 @@ function readParamsFromUI() {
     rectProfThickness:       parseFloat(els.rectProfThickness.value)       || 1.5,
     rectProfBottomThickness: Number.isFinite(parseFloat(els.rectProfBottomThickness.value)) ? parseFloat(els.rectProfBottomThickness.value) : 1.2,
     rectProfHeight:          parseFloat(els.rectProfHeight.value)          || 40,
+    facePickRot:             parseFloat(els.facePickRot.value)             || 0,
     autoCrop: state.autoCrop,
     rotation: state.rotation,
     zoomX: parseFloat(els.zoomSliderX.value) / 100 || 1,
@@ -1867,6 +1987,7 @@ function writeParamsToUI(p) {
   setNum('rectProfThickness',       'rectProfThicknessNum',       p.rectProfThickness);
   setNum('rectProfBottomThickness', 'rectProfBottomThicknessNum', p.rectProfBottomThickness);
   setNum('rectProfHeight',          'rectProfHeightNum',          p.rectProfHeight);
+  setNum('facePickRot',             'facePickRotNum',             p.facePickRot);
   setNum('stlRenderSize', 'stlRenderSizeNum', p.stlRenderSize);
   setNum('tileX', 'tileXNum', p.uiTileX != null ? p.uiTileX : p.tileX);
   setNum('tileY', 'tileYNum', p.uiTileY != null ? p.uiTileY : p.tileY);
@@ -1927,7 +2048,7 @@ function writeParamsToUI(p) {
     state.heightSmooth = !!p.heightSmooth;
     if (els.heightSmooth) els.heightSmooth.checked = state.heightSmooth;
   }
-  if (p.shape === 'rectangular' || p.shape === 'cylindrical' || p.shape === 'polygon' || p.shape === 'customProfile' || p.shape === 'polyProfile' || p.shape === 'stlWrap' || p.shape === 'ellipse' || p.shape === 'rectProfile') {
+  if (p.shape === 'rectangular' || p.shape === 'cylindrical' || p.shape === 'polygon' || p.shape === 'customProfile' || p.shape === 'polyProfile' || p.shape === 'stlWrap' || p.shape === 'stlFace' || p.shape === 'ellipse' || p.shape === 'rectProfile') {
     state.shape = p.shape;
     els.shape.value = p.shape;
   }
@@ -2022,6 +2143,9 @@ if (state.shape === 'customProfile') {
 }
 if (state.shape === 'stlWrap') {
   loadDefaultWrapStl();
+}
+if (state.shape === 'stlFace') {
+  loadDefaultFaceStl();
 }
 
 // ---------- file input ----------
@@ -2375,6 +2499,12 @@ function getTargetDims(params) {
   } else if (params.shape === 'cylindrical' || params.shape === 'stlWrap' || params.shape === 'ellipse' || params.shape === 'rectProfile') {
     w = params.plateW * params.tileX;
     h = params.plateH;
+  } else if (params.shape === 'stlFace') {
+    // Heightmap grid matches the picked face's (u,v) bounding box so the image
+    // fills the face without distortion.
+    const region = getFaceRegion();
+    w = region ? (region.bbox.umax - region.bbox.umin) || params.plateW : params.plateW;
+    h = region ? (region.bbox.vmax - region.bbox.vmin) || params.plateH : params.plateH;
   } else {
     w = params.plateW;
     h = params.plateH;
@@ -2440,6 +2570,10 @@ function polyProfileDims(params) {
 function estimateTrisForShape(targetW, targetH, shape, sides, hasChamfer, profileLen) {
   if (shape === 'cylindrical') return estimateCylindricalTriangleCount(targetW, targetH);
   if (shape === 'stlWrap') return estimateSTLWrapTriangleCount(targetW, targetH);
+  if (shape === 'stlFace') {
+    return estimateSTLFaceTriangleCount(targetW, targetH)
+      + (state.faceStl ? state.faceStl.triCount : 0);
+  }
   if (shape === 'ellipse') return estimateEllipseTriangleCount(targetW, targetH);
   if (shape === 'rectProfile') return estimateRectProfileTriangleCount(targetW, targetH);
   if (shape === 'polygon') return estimatePolygonPrismTriangleCount(sides, targetW, targetH, hasChamfer);
@@ -2460,9 +2594,24 @@ function estimateTrisForShape(targetW, targetH, shape, sides, hasChamfer, profil
   return estimateTriangleCount(targetW, targetH);
 }
 
+// Show the raw face-mode STL on its own (no relief), so the user can orbit and
+// click a face before a relief image is even loaded.
+function showFaceStlBare() {
+  if (!state.faceStl) return;
+  const geom = buildSTLFaceGeometry(null, {
+    stl: state.faceStl, pick: null
+  });
+  state.geometry = geom;
+  ensureFacePicking();
+  viewer.setMesh(geom.positions, geom.indices, null);
+  setExportEnabled(false);
+  updateStats({ tris: geom.triCount, verts: geom.vertCount });
+}
+
 function triggerProcessing(immediate) {
   if (!state.sourceCanvas) {
-    updateStats();
+    if (state.shape === 'stlFace' && state.faceStl) showFaceStlBare();
+    else updateStats();
     return;
   }
   if (processTimer) clearTimeout(processTimer);
@@ -2552,6 +2701,10 @@ function regeneratePreview() {
     }
     baseW = params.plateW * params.tileX;
     baseH = params.plateH;
+  } else if (params.shape === 'stlFace') {
+    const region = getFaceRegion();
+    baseW = region ? (region.bbox.umax - region.bbox.umin) || params.plateW : params.plateW;
+    baseH = region ? (region.bbox.vmax - region.bbox.vmin) || params.plateH : params.plateH;
   } else {
     baseW = params.plateW;
     baseH = params.plateH;
@@ -2658,6 +2811,46 @@ function regeneratePreview() {
 // user-chosen color for that level. All geometry builders place the outer
 // surface as the first Nx*Ny vertices (same row-major order as levelMap),
 // and the inner/back surface as the next Nx*Ny vertices.
+// Colors for the "stl face" mesh: sample the processed image at each relief
+// top vertex's face UV (fx, fy ∈ [0,1], fy already top-up). Everything past the
+// relief top — slab bottom/walls and the STL itself — is left neutral gray.
+function buildFaceVertexColors(geom, processed) {
+  const totalVerts = geom.positions.length / 3;
+  const out = new Float32Array(totalVerts * 3);
+  const g = 0.83; // ≈ solid material color 0xd4d6dc
+  for (let v = 0; v < totalVerts; v++) {
+    out[v * 3] = g; out[v * 3 + 1] = g; out[v * 3 + 2] = g;
+  }
+  const top = geom.faceTopVertCount;
+  const uv = geom.faceTopUV;
+  if (!top || !uv) return out;
+  const W = processed.width, H = processed.height;
+  const N = processed.colorCount;
+  const levelMap = processed.levelMap;
+  const colors = state.layerColors.slice(0, N);
+  if (N === 1) {
+    const [cr, cg, cb] = hexToRgb(colors[0] || '#e0e0e0');
+    for (let v = 0; v < top; v++) {
+      const px = Math.min(W - 1, Math.max(0, Math.round(uv[v * 2] * (W - 1))));
+      const py = Math.min(H - 1, Math.max(0, Math.round((1 - uv[v * 2 + 1]) * (H - 1))));
+      const t = Math.min(255, Math.max(0, levelMap[py * W + px])) / 255;
+      out[v * 3]     = (255 + t * (cr - 255)) / 255;
+      out[v * 3 + 1] = (255 + t * (cg - 255)) / 255;
+      out[v * 3 + 2] = (255 + t * (cb - 255)) / 255;
+    }
+  } else {
+    const rgbs = colors.map((c) => hexToRgb(c));
+    for (let v = 0; v < top; v++) {
+      const px = Math.min(W - 1, Math.max(0, Math.round(uv[v * 2] * (W - 1))));
+      const py = Math.min(H - 1, Math.max(0, Math.round((1 - uv[v * 2 + 1]) * (H - 1))));
+      const level = Math.min(levelMap[py * W + px], N - 1);
+      const [r, gg, b] = rgbs[level] || [136, 136, 136];
+      out[v * 3] = r / 255; out[v * 3 + 1] = gg / 255; out[v * 3 + 2] = b / 255;
+    }
+  }
+  return out;
+}
+
 function buildVertexColors(geom, processed) {
   const Nx = geom.Nx, Ny = geom.Ny;
   const surfaceVerts = Nx * Ny;
@@ -2730,6 +2923,17 @@ function regenerateMesh() {
         baseThickness: params.baseThickness,
         closedBottom: params.closedBottom
       });
+    } else if (params.shape === 'stlFace') {
+      if (!state.faceStl) {
+        showWarning('Load a target STL first.', false);
+        setExportEnabled(false);
+        return;
+      }
+      geom = buildSTLFaceGeometry(heightmap, {
+        stl: state.faceStl,
+        region: getFaceRegion(),
+        baseThickness: params.baseThickness
+      });
     } else if (params.shape === 'ellipse') {
       geom = buildEllipseGeometry(heightmap, {
         xSize: params.ellipseX,
@@ -2787,11 +2991,26 @@ function regenerateMesh() {
     return;
   }
 
+  // STL-face mode keeps the raycast target current and enables click-picking
+  // so the user can (re)place the relief by clicking the surface.
+  if (params.shape === 'stlFace') ensureFacePicking();
+
   // Build vertex colors from the single-tile geometry first (the color
   // builder relies on Nx*Ny being the outer-surface block), then tile the
   // geometry and the colors together along the chosen axis.
-  let vertexColors = buildVertexColors(geom, state.processed);
-  const repeatN = Math.max(1, params.repeatCount | 0 || 1);
+  let vertexColors;
+  if (params.shape === 'stlFace') {
+    // Only the embossed relief surface carries image colors (sampled at each
+    // top vertex's face UV); the rest of the slab and the STL stay neutral.
+    vertexColors = (geom.faceTopVertCount > 0)
+      ? buildFaceVertexColors(geom, state.processed)
+      : null;
+  } else {
+    vertexColors = buildVertexColors(geom, state.processed);
+  }
+  // Repeat/tiling is a flat-grid concept; the STL-face slab has no such grid
+  // (and the STL would be duplicated), so skip replication there.
+  const repeatN = params.shape === 'stlFace' ? 1 : Math.max(1, params.repeatCount | 0 || 1);
   if (repeatN > 1) {
     const r = replicateGeometry(geom, vertexColors, repeatN, params.repeatOffset || 0, params.repeatAxis || 'y');
     geom = r.geom;
@@ -2914,6 +3133,12 @@ function exportFilename(ext, params) {
       ? state.wrapStlFilename.replace(/\.[^.]+$/, '').replace(/[^A-Za-z0-9_-]+/g, '_')
       : 'wrap';
     return `${name}_on_${wrapTag}_h${f}mm${c}.${ext}`;
+  }
+  if (params.shape === 'stlFace') {
+    const faceTag = state.faceStlFilename
+      ? state.faceStlFilename.replace(/\.[^.]+$/, '').replace(/[^A-Za-z0-9_-]+/g, '_')
+      : 'face';
+    return `${name}_onface_${faceTag}_h${f}mm${c}.${ext}`;
   }
   if (params.shape === 'ellipse') {
     const ex = stripTrailing(params.ellipseX);
@@ -3093,6 +3318,17 @@ function gatherProjectData() {
       };
     }
   }
+  if (state.faceStl) {
+    const enc = encodeMesh(state.faceStl);
+    if (enc) {
+      data.faceStl = {
+        ...enc,
+        filename: state.faceStlFilename,
+        source: state.faceStlSource,
+        pick: state.facePick
+      };
+    }
+  }
   return data;
 }
 
@@ -3143,6 +3379,22 @@ async function applyProjectData(data) {
     state.wrapStlInfo = null;
   }
 
+  // 3b. Face STL target + picked point
+  if (data.faceStl) {
+    state.faceStl = decodeMesh(data.faceStl);
+    state.faceStlFilename = data.faceStl.filename || null;
+    state.faceStlSource = data.faceStl.source || null;
+    state.faceStlInfo = state.faceStl ? computeWrapStlInfo(state.faceStl) : null;
+    state.facePick = data.faceStl.pick || null;
+  } else {
+    state.faceStl = null;
+    state.faceStlFilename = null;
+    state.faceStlSource = null;
+    state.faceStlInfo = null;
+    state.facePick = null;
+  }
+  state._pickTargetStl = null;
+
   // 4. UI params — sets state.shape, layer config, sliders, etc.
   if (data.params) writeParamsToUI(data.params);
 
@@ -3165,6 +3417,14 @@ async function applyProjectData(data) {
   } else {
     setWrapStlStatus('');
   }
+  if (state.faceStlInfo && state.faceStlFilename) {
+    setFaceStlStatus(formatWrapStlInfo(state.faceStlFilename, state.faceStlInfo));
+  } else {
+    setFaceStlStatus('No STL loaded');
+  }
+  setFacePickStatus(state.facePick
+    ? 'Relief placed — click the STL again to move it.'
+    : 'Click a point on the STL in the 3D view to place the relief.');
 
   // 6. Re-derive source pipeline from the restored canvas + params.
   applyRotation();
