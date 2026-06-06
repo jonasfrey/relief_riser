@@ -83,6 +83,7 @@ const els = {
   whitePoint: $('whitePoint'),       whitePointNum: $('whitePointNum'),
   autoStretch: $('autoStretch'),
   autoStretchShape: $('autoStretchShape'),
+  autoZoomShape: $('autoZoomShape'),
   invert: $('invert'),
   colorCount: $('colorCount'),
   resolutionMode: $('resolutionMode'),
@@ -354,6 +355,24 @@ els.autoStretchShape.addEventListener('click', () => {
   els.stretchXNum.value = sx.toFixed(2);
   els.stretchY.value = sy.toFixed(2);
   els.stretchYNum.value = sy.toFixed(2);
+  onParamChange();
+});
+
+// Auto-crop zoom: pick zoomX / zoomY (the crop window) so the kept region's
+// aspect matches the unrolled shape surface and covers it without
+// letterboxing. Unlike auto-stretch (which widens pixels), this trims one
+// axis of the source. Computed from the full source so the result is
+// deterministic regardless of the current zoom — one axis ends at 100%, the
+// other is cropped in.
+els.autoZoomShape.addEventListener('click', () => {
+  const dims = computeAutoZoomDims();
+  if (!dims) return;
+  const { zx, zy } = dims;
+  els.zoomSliderX.value = zx.toFixed(1);
+  els.zoomSliderXNum.value = zx.toFixed(1);
+  els.zoomSliderY.value = zy.toFixed(1);
+  els.zoomSliderYNum.value = zy.toFixed(1);
+  paintSourceWithOverlay();
   onParamChange();
 });
 
@@ -2470,6 +2489,48 @@ function computeAutoStretchDims() {
   const R = (baseW * tileY * imgH) / (baseH * tileX * imgW);
   const clamp = (v) => Math.max(1, Math.min(2, v));
   return R >= 1 ? { sx: clamp(R), sy: 1 } : { sx: 1, sy: clamp(1 / R) };
+}
+
+// Auto-crop counterpart of computeAutoStretchDims: instead of stretching
+// pixels, trim the crop window so the kept region's aspect matches the shape
+// surface and covers it. Computed from the *full* source so the result is
+// independent of the current zoom; current stretch is folded in so the two
+// auto buttons compose. Returns zoom percentages in [5, 100].
+function computeAutoZoomDims() {
+  if (!state.sourceCanvas) return null;
+  const params = readParamsFromUI();
+  let baseW, baseH;
+  if (params.shape === 'customProfile') {
+    const cd = customProfileDims(params);
+    if (!cd) return null;
+    baseW = cd.circumference;
+    baseH = cd.bandLength;
+  } else if (params.shape === 'cylindrical' || params.shape === 'stlWrap' || params.shape === 'ellipse' || params.shape === 'rectProfile') {
+    baseW = params.plateW * params.tileX;
+    baseH = params.plateH;
+  } else {
+    baseW = params.plateW;
+    baseH = params.plateH;
+  }
+  if (!(baseW > 0) || !(baseH > 0)) return null;
+
+  const srcW = state.sourceCanvas.width;
+  const srcH = state.sourceCanvas.height;
+  if (!(srcW > 0) || !(srcH > 0)) return null;
+
+  const tileX = Math.max(1, params.tileX | 0 || 1);
+  const tileY = Math.max(1, params.tileY | 0 || 1);
+  const sx = params.stretchX > 0 ? params.stretchX : 1;
+  const sy = params.stretchY > 0 ? params.stretchY : 1;
+
+  // Want (srcW·fX·sx·tileX)/(srcH·fY·sy·tileY) = baseW/baseH, with one
+  // fraction pinned at 1 (= 100% zoom) so we crop the minimum needed.
+  // Solve fX/fY = K; K ≤ 1 → crop X, K > 1 → crop Y.
+  const K = (baseW * srcH * sy * tileY) / (baseH * srcW * sx * tileX);
+  const clampPct = (frac) => Math.max(5, Math.min(100, frac * 100));
+  return K <= 1
+    ? { zx: clampPct(K), zy: 100 }
+    : { zx: 100, zy: clampPct(1 / K) };
 }
 
 function getTargetDims(params) {
